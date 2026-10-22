@@ -1,0 +1,16 @@
+services:
+  calories:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Only reachable from the VPS itself; put Caddy/nginx in front for HTTPS.
+      # Change to "8080:8080" to expose it directly (plain HTTP, not recommended).
+      - "127.0.0.1:8080:8080"
+    environment:
+      TRUST_PROXY: "1"        # read the real client IP from X-Forwarded-For
+      # ALLOW_SIGNUP: "1"     # let anyone create an account (off by default)
+    volumes:
+      - calories-data:/data
+
+volumes:
+  calories-data:

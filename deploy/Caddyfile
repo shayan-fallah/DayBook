@@ -1,0 +1,7 @@
+# Caddy gets a free HTTPS certificate automatically.
+# Point your domain's DNS A record at the VPS, replace the domain below, then:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+calories.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

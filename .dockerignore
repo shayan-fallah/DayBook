@@ -1,0 +1,7 @@
+data/
+tests/
+deploy/
+__pycache__/
+*.db
+.git
+android/

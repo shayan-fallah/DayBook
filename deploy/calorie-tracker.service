@@ -1,0 +1,26 @@
+# systemd unit. Install:
+#   sudo cp deploy/calorie-tracker.service /etc/systemd/system/
+#   (edit User= and the paths below to match where you put the app)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now calorie-tracker
+[Unit]
+Description=Calorie tracker
+After=network.target
+
+[Service]
+User=tracker
+WorkingDirectory=/opt/calorie-tracker
+ExecStart=/usr/bin/python3 /opt/calorie-tracker/app.py
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+Environment=DATA_DIR=/opt/calorie-tracker/data
+Environment=TRUST_PROXY=1
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/calorie-tracker/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

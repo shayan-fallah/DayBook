@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Calorie Tracker</title>
+<meta name="theme-color" content="#2a78d6">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<!-- Login / sign-up -->
+<div id="auth" class="auth" hidden>
+  <form id="auth-form" class="card auth-card">
+    <div class="brand"><img src="/static/icon.svg" alt="" width="40" height="40"><span>Calorie Tracker</span></div>
+    <h1 id="auth-title">Log in</h1>
+    <p id="auth-hint" class="muted"></p>
+    <label>Username <input name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required minlength="6"></label>
+    <p id="auth-error" class="error" role="alert"></p>
+    <button class="primary wide" id="auth-submit">Log in</button>
+    <button type="button" class="link" id="auth-toggle" hidden>Create an account</button>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <main>
+    <!-- TODAY -->
+    <section id="view-today" class="view">
+      <div class="datebar">
+        <button class="icon" id="prev-day" aria-label="Previous day">‹</button>
+        <label class="date-pick">
+          <span id="date-label"></span>
+          <input type="date" id="date-input" aria-label="Pick a date">
+        </label>
+        <button class="icon" id="next-day" aria-label="Next day">›</button>
+      </div>
+
+      <div id="setup-banner" class="banner" hidden>
+        Add your height, weight and age in <a href="#settings">Settings</a> to get a personal calorie goal.
+      </div>
+
+      <div class="card summary">
+        <div class="hero">
+          <div class="hero-num" id="kcal-left">0</div>
+          <div class="hero-sub" id="kcal-left-label">kcal left</div>
+        </div>
+        <div class="meter big" role="presentation"><div class="fill" id="kcal-fill"></div></div>
+        <div class="equation">
+          <span><b id="s-goal">0</b> goal</span><span class="op">−</span>
+          <span><b id="s-food">0</b> food</span><span class="op">+</span>
+          <span><b id="s-ex">0</b> exercise</span>
+        </div>
+        <div class="macros" id="macros"></div>
+        <div class="minis" id="minis"></div>
+      </div>
+
+      <div class="card trackers">
+        <div class="tracker">
+          <div class="tracker-label">Water <span class="muted" id="water-count"></span></div>
+          <div class="water-row">
+            <button class="icon small" id="water-minus" aria-label="Remove a glass">−</button>
+            <div class="glasses" id="glasses"></div>
+            <button class="icon small" id="water-plus" aria-label="Add a glass">+</button>
+          </div>
+        </div>
+        <div class="tracker-pair">
+          <label class="tracker">
+            <span class="tracker-label">Weight</span>
+            <span class="input-unit"><input id="weight-input" inputmode="decimal" autocomplete="off"><span>kg</span></span>
+          </label>
+          <label class="tracker">
+            <span class="tracker-label">Exercise</span>
+            <span class="input-unit"><input id="exercise-input" inputmode="numeric" autocomplete="off" placeholder="0"><span>kcal</span></span>
+          </label>
+        </div>
+      </div>
+
+      <div id="meals"></div>
+      <div id="day-actions" class="day-actions"></div>
+    </section>
+
+    <!-- HISTORY -->
+    <section id="view-history" class="view" hidden>
+      <div class="seg" id="range" role="group" aria-label="Time range">
+        <button data-days="7">7 days</button>
+        <button data-days="30">30 days</button>
+        <button data-days="90">90 days</button>
+        <button data-days="365">1 year</button>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="card">
+        <h2>Calories per day</h2>
+        <p class="sub">Bars are what you ate; the line is your goal plus exercise.</p>
+        <div class="chart" id="kcal-chart"></div>
+        <details class="table-view"><summary>Show as table</summary><div id="kcal-table"></div></details>
+      </div>
+      <div class="card">
+        <h2>Weight</h2>
+        <div id="weight-summary" class="sub"></div>
+        <div class="chart" id="weight-chart"></div>
+        <details class="table-view"><summary>Weight log</summary><div id="weight-table"></div></details>
+      </div>
+      <div class="card">
+        <h2>Average macros</h2>
+        <p class="sub">Share of calories on logged days.</p>
+        <div id="macro-split"></div>
+      </div>
+      <div class="card">
+        <h2>Calories by meal</h2>
+        <div id="meal-split"></div>
+      </div>
+      <div class="card">
+        <h2>Top calorie sources</h2>
+        <div id="top-foods"></div>
+      </div>
+    </section>
+
+    <!-- FOODS -->
+    <section id="view-foods" class="view" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>My foods</h2>
+          <button class="primary" id="new-food">+ New food</button>
+        </div>
+        <p class="sub">Add foods that aren't in the database, like a home recipe or a product label. They show up in search.</p>
+        <ul class="list" id="my-foods"></ul>
+      </div>
+      <div class="card">
+        <h2>Favorites</h2>
+        <p class="sub">Tap ☆ on any food to pin it here and to the top of search.</p>
+        <ul class="list" id="fav-foods"></ul>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="view-settings" class="view" hidden>
+      <form id="profile-form" class="card form">
+        <h2>Body and goal</h2>
+        <div class="grid2">
+          <fieldset class="radios">
+            <legend>Sex</legend>
+            <label><input type="radio" name="sex" value="male"> Male</label>
+            <label><input type="radio" name="sex" value="female"> Female</label>
+          </fieldset>
+          <label>Age <input name="age" inputmode="numeric" placeholder="30"></label>
+          <label>Height (cm) <input name="height_cm" inputmode="decimal" placeholder="175"></label>
+          <label>Weight (kg) <input name="weight" inputmode="decimal" placeholder="75"></label>
+        </div>
+        <label>Activity
+          <select name="activity">
+            <option value="sedentary">Sedentary: desk job, little exercise</option>
+            <option value="light">Light: exercise 1–3 days/week</option>
+            <option value="moderate">Moderate: exercise 3–5 days/week</option>
+            <option value="active">Active: exercise 6–7 days/week</option>
+            <option value="very">Very active: physical job or 2×/day training</option>
+          </select>
+        </label>
+        <label>Goal
+            <select name="rate_kg_week">
+              <option value="-1">Lose 1 kg / week</option>
+              <option value="-0.75">Lose 0.75 kg / week</option>
+              <option value="-0.5">Lose 0.5 kg / week</option>
+              <option value="-0.25">Lose 0.25 kg / week</option>
+              <option value="0">Maintain weight</option>
+              <option value="0.25">Gain 0.25 kg / week</option>
+              <option value="0.5">Gain 0.5 kg / week</option>
+            </select>
+        </label>
+        <label>Goal weight (kg) <input name="target_weight" inputmode="decimal" placeholder="optional"></label>
+        <div class="calc" id="calc"></div>
+
+        <h2>Daily targets</h2>
+        <label>Calorie goal (kcal)
+          <input name="calorie_goal" inputmode="numeric" id="goal-input">
+          <span class="hint">Leave empty to use the suggested goal above.</span>
+        </label>
+        <div class="grid3">
+          <label>Protein % <input name="protein_pct" inputmode="numeric"></label>
+          <label>Carbs % <input name="carbs_pct" inputmode="numeric"></label>
+          <label>Fat % <input name="fat_pct" inputmode="numeric"></label>
+        </div>
+        <p class="hint" id="pct-sum"></p>
+        <label>Water goal (glasses of 250 ml) <input name="water_goal" inputmode="numeric"></label>
+        <p class="error" id="profile-error" role="alert"></p>
+        <button class="primary wide">Save</button>
+      </form>
+
+      <div class="card">
+        <h2>Your data</h2>
+        <div class="btn-row">
+          <a class="btn" href="/api/export?type=entries" download>Download food log (CSV)</a>
+          <a class="btn" href="/api/export?type=weights" download>Download weights (CSV)</a>
+        </div>
+      </div>
+
+      <form id="pw-form" class="card form">
+        <h2>Change password</h2>
+        <label>Current password <input name="current" type="password" autocomplete="current-password" required></label>
+        <label>New password <input name="new" type="password" autocomplete="new-password" required minlength="6"></label>
+        <p class="error" id="pw-error" role="alert"></p>
+        <button class="wide">Change password</button>
+      </form>
+
+      <div class="card account">
+        <span>Signed in as <b id="me-name"></b></span>
+        <button id="logout">Log out</button>
+      </div>
+      <p class="credit">Food data from <a href="https://figfit.ir" target="_blank" rel="noopener">Fig Fit</a>, licensed CC BY-NC-SA 4.0.</p>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Main">
+    <a href="#today" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v15H4zM4 9h16M8 3v4M16 3v4"/></svg>Today</a>
+    <a href="#history" data-view="history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V5M19 20v-6"/></svg>History</a>
+    <a href="#foods" data-view="foods"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c-3-3-8-1-7 5s4 8 7 6c3 2 6 0 7-6s-4-8-7-5zM12 8c0-2 1-4 3-5"/></svg>Foods</a>
+    <a href="#settings" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Settings</a>
+  </nav>
+</div>
+
+<!-- Add / edit a log entry -->
+<dialog id="add-dlg" class="sheet">
+  <div class="sheet-head">
+    <select id="add-meal" aria-label="Meal"></select>
+    <span id="add-title" class="sheet-title">Add food</span>
+    <button class="icon" id="add-close" aria-label="Close">✕</button>
+  </div>
+
+  <div id="pick-pane" class="sheet-body">
+    <input id="search" type="search" dir="auto" autocomplete="off" enterkeyhint="search"
+           placeholder="Search foods: نان، برنج، سیب…">
+    <div class="chips" id="quick-tabs">
+      <button data-tab="recent">Recent</button>
+      <button data-tab="favorites">Favorites</button>
+      <button data-tab="mine">My foods</button>
+      <button data-tab="quick">Quick calories</button>
+    </div>
+    <ul class="list results" id="results"></ul>
+    <form id="quick-form" class="form" hidden>
+      <p class="sub">For a meal out or anything you only know the calories of.</p>
+      <label>Description <input name="name" dir="auto" placeholder="Quick add" maxlength="100"></label>
+      <div class="grid2">
+        <label>Calories (kcal) <input name="kcal" inputmode="decimal" required></label>
+        <label>Protein (g) <input name="protein" inputmode="decimal" placeholder="optional"></label>
+        <label>Carbs (g) <input name="carbs" inputmode="decimal" placeholder="optional"></label>
+        <label>Fat (g) <input name="fat" inputmode="decimal" placeholder="optional"></label>
+      </div>
+      <p class="error" id="quick-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="quick-delete" hidden>Delete</button>
+        <button class="primary" id="quick-save">Add</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="detail-pane" class="sheet-body" hidden>
+    <button class="link back" id="detail-back">‹ Back to search</button>
+    <div class="detail-head">
+      <h3 id="d-name" dir="auto"></h3>
+      <button class="icon star" id="d-fav" aria-label="Favorite" aria-pressed="false">☆</button>
+    </div>
+    <p class="sub" id="d-per100"></p>
+    <div class="amount">
+      <input id="d-qty" inputmode="decimal" autocomplete="off" aria-label="Amount">
+      <select id="d-unit" dir="ltr" aria-label="Unit"></select>
+    </div>
+    <div class="chips" id="d-chips"></div>
+    <div class="preview">
+      <div class="preview-kcal"><b id="p-kcal">0</b> kcal <span class="muted" id="p-grams"></span></div>
+      <div class="preview-macros" id="p-macros"></div>
+    </div>
+    <p class="error" id="detail-error" role="alert"></p>
+    <div class="actions">
+      <button class="danger" id="d-delete" hidden>Delete</button>
+      <button class="primary" id="d-save">Add</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Create / edit a custom food -->
+<dialog id="food-dlg" class="sheet">
+  <form id="food-form" class="form">
+    <div class="sheet-head">
+      <span class="sheet-title" id="food-title">New food</span>
+      <button type="button" class="icon" id="food-close" aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <label>Name <input name="name" dir="auto" required maxlength="100"></label>
+      <div class="grid2">
+        <label>Serving name <input name="serving_name" dir="auto" placeholder="serving" maxlength="40"></label>
+        <label>Serving size (g) <input name="serving_grams" inputmode="decimal" required placeholder="100"></label>
+      </div>
+      <p class="sub">Nutrition for one serving:</p>
+      <div class="grid2">
+        <label>Calories (kcal) <input name="kcal" inputmode="decimal" required></label>
+        <label>Protein (g) <input name="protein" inputmode="decimal"></label>
+        <label>Carbs (g) <input name="carbs" inputmode="decimal"></label>
+        <label>Fat (g) <input name="fat" inputmode="decimal"></label>
+        <label>Fiber (g) <input name="fiber" inputmode="decimal"></label>
+        <label>Sugar (g) <input name="sugar" inputmode="decimal"></label>
+        <label>Sodium (mg) <input name="sodium" inputmode="decimal"></label>
+      </div>
+      <p class="error" id="food-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="food-delete" hidden>Delete</button>
+        <button class="primary">Save</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<div id="tooltip" class="tooltip" role="status" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
