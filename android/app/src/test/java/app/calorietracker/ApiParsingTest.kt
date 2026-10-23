@@ -8,11 +8,15 @@ import app.calorietracker.data.Profile
 import app.calorietracker.data.QuickLists
 import app.calorietracker.data.SearchReply
 import app.calorietracker.data.Stats
+import app.calorietracker.data.WorkoutMeta
+import app.calorietracker.data.WorkoutStats
 import app.calorietracker.data.jsonBody
 import app.calorietracker.data.normalizeServerUrl
+import app.calorietracker.ui.duration
 import app.calorietracker.ui.isolate
 import app.calorietracker.ui.parseNum
 import app.calorietracker.ui.portionText
+import app.calorietracker.ui.workoutSub
 import kotlinx.serialization.decodeFromString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -108,5 +112,64 @@ class ApiParsingTest {
         val text = portionText(e)
         assertTrue(text, text.contains(isolate(e.unit!!)))
         assertTrue(text, text.endsWith(" g"))
+    }
+
+    @Test fun oldDayWithoutWorkouts() {
+        val d = json.decodeFromString<Day>(fixture("day.json"))
+        assertTrue(d.workouts.isEmpty())
+        assertEquals(100, d.exercisePct)
+    }
+
+    @Test fun workoutDay() {
+        val d = json.decodeFromString<Day>(fixture("workout_day.json"))
+        assertEquals(3, d.workouts.size)
+        assertEquals(d.workouts.sumOf { it.kcal }, d.burned)
+        assertEquals(d.burned, d.exercise)
+        val lift = d.workouts.first()
+        assertEquals("strength", lift.kind)
+        assertTrue(lift.muscles.isNotEmpty())
+        val run = d.workouts.last()
+        assertEquals("running", run.activity)
+        assertEquals(7.0, run.distanceKm!!, 0.001)
+        assertEquals("40 min · Moderate · 7 km (5:43 /km) · Tempo", workoutSub(run))
+    }
+
+    @Test fun workoutMeta() {
+        val m = json.decodeFromString<WorkoutMeta>(fixture("workouts_meta.json"))
+        assertEquals("bodybuilding", m.activities.first().key)
+        assertTrue(m.activities.all { it.met.size == 3 })
+        assertTrue(m.activities.first { it.key == "running" }.distance)
+        assertEquals(8, m.muscles.size)
+        assertNotNull(m.weight)
+        assertTrue(m.recent.isNotEmpty())
+    }
+
+    @Test fun workoutStats() {
+        val s = json.decodeFromString<WorkoutStats>(fixture("workouts_stats.json"))
+        assertEquals(7, s.buckets.size)
+        assertEquals(1, s.bucketDays)
+        assertEquals(s.totals.minutes, s.buckets.sumOf { it.minutes })
+        assertTrue(s.week.goal in 1..7)
+        assertEquals(7, s.muscles.size)
+        assertTrue(s.byActivity.isNotEmpty())
+        val long = json.decodeFromString<WorkoutStats>(fixture("workouts_stats_90.json"))
+        assertEquals(7, long.bucketDays)
+        assertEquals(13, long.buckets.size)
+    }
+
+    @Test fun profileWithTraining() {
+        val p = json.decodeFromString<Profile>(fixture("profile_v2.json"))
+        assertEquals(4, p.workoutGoal)
+        assertEquals(100, p.exercisePct)
+    }
+
+    @Test fun durations() {
+        assertEquals("45 min", duration(45))
+        assertEquals("1 h", duration(60))
+        assertEquals("1 h 30 min", duration(90))
+    }
+
+    @Test fun listsInJsonBody() {
+        assertEquals("""{"muscles":["chest","back"],"kcal":null}""", jsonBody("muscles" to listOf("chest", "back"), "kcal" to null).toString())
     }
 }

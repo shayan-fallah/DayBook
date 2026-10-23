@@ -129,7 +129,7 @@ private fun Tiles(s: Stats) {
 }
 
 @Composable
-private fun Tile(label: String, value: String, unit: String, sub: String, modifier: Modifier) {
+internal fun Tile(label: String, value: String, unit: String, sub: String, modifier: Modifier) {
     val p = LocalPalette.current
     AppCard(modifier, padding = 14.dp) {
         Text(label, style = MaterialTheme.typography.bodySmall, color = p.ink2)
@@ -141,7 +141,7 @@ private fun Tile(label: String, value: String, unit: String, sub: String, modifi
     }
 }
 
-private fun niceStep(range: Double, target: Int = 4): Double {
+internal fun niceStep(range: Double, target: Int = 4): Double {
     val raw = range / target
     if (raw <= 0) return 1.0
     val mag = 10.0.pow(floor(log10(raw)))
@@ -151,7 +151,7 @@ private fun niceStep(range: Double, target: Int = 4): Double {
 
 private fun compact(v: Double) = if (v >= 1000) "${fmt1(v / 1000)}K" else fmt(v)
 
-private fun DrawScope.label(m: TextMeasurer, text: String, x: Float, y: Float, style: TextStyle, align: Float = 0f) {
+internal fun DrawScope.label(m: TextMeasurer, text: String, x: Float, y: Float, style: TextStyle, align: Float = 0f) {
     // align: 0 = left edge at x, 0.5 = centered, 1 = right edge at x. y is the vertical center.
     val layout = m.measure(text, style)
     drawText(layout, topLeft = Offset(x - layout.size.width * align, y - layout.size.height / 2f))

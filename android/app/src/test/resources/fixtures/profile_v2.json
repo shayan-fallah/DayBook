@@ -1,0 +1,30 @@
+{
+    "sex": "male",
+    "age": 29,
+    "height_cm": 180.0,
+    "activity": "light",
+    "rate_kg_week": 0.0,
+    "target_weight": null,
+    "calorie_goal": null,
+    "protein_pct": 25,
+    "carbs_pct": 45,
+    "fat_pct": 30,
+    "water_goal": 8,
+    "exercise_pct": 100,
+    "workout_goal": 4,
+    "weight": 82.0,
+    "targets": {
+        "kcal": 2480,
+        "protein": 155,
+        "carbs": 279,
+        "fat": 83,
+        "fiber": 35,
+        "sugar": 50,
+        "sodium": 2300,
+        "water": 8,
+        "bmr": 1805,
+        "tdee": 2482,
+        "suggested": 2480,
+        "manual": false
+    }
+}

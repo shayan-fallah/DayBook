@@ -1,0 +1,357 @@
+{
+    "start": "2026-10-17",
+    "end": "2026-10-23",
+    "bucket_days": 1,
+    "buckets": [
+        {
+            "start": "2026-10-17",
+            "end": "2026-10-17",
+            "strength": 60,
+            "cardio": 30,
+            "other": 0,
+            "sessions": 2,
+            "kcal": 636
+        },
+        {
+            "start": "2026-10-18",
+            "end": "2026-10-18",
+            "strength": 0,
+            "cardio": 35,
+            "other": 0,
+            "sessions": 1,
+            "kcal": 421
+        },
+        {
+            "start": "2026-10-19",
+            "end": "2026-10-19",
+            "strength": 75,
+            "cardio": 30,
+            "other": 0,
+            "sessions": 2,
+            "kcal": 594
+        },
+        {
+            "start": "2026-10-20",
+            "end": "2026-10-20",
+            "strength": 90,
+            "cardio": 30,
+            "other": 0,
+            "sessions": 2,
+            "kcal": 718
+        },
+        {
+            "start": "2026-10-21",
+            "end": "2026-10-21",
+            "strength": 0,
+            "cardio": 0,
+            "other": 0,
+            "sessions": 0,
+            "kcal": 0
+        },
+        {
+            "start": "2026-10-22",
+            "end": "2026-10-22",
+            "strength": 60,
+            "cardio": 20,
+            "other": 0,
+            "sessions": 2,
+            "kcal": 478
+        },
+        {
+            "start": "2026-10-23",
+            "end": "2026-10-23",
+            "strength": 60,
+            "cardio": 60,
+            "other": 0,
+            "sessions": 3,
+            "kcal": 1014
+        }
+    ],
+    "totals": {
+        "sessions": 12,
+        "minutes": 550,
+        "kcal": 3861,
+        "strength": 345,
+        "cardio": 205,
+        "other": 0,
+        "days": 6
+    },
+    "week": {
+        "days": 6,
+        "sessions": 12,
+        "goal": 4,
+        "minutes": 550,
+        "kcal": 3861
+    },
+    "goal_streak": 6,
+    "by_activity": [
+        {
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "sessions": 5,
+            "minutes": 345,
+            "kcal": 2050
+        },
+        {
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "sessions": 3,
+            "minutes": 80,
+            "kcal": 602
+        },
+        {
+            "activity": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "sessions": 2,
+            "minutes": 75,
+            "kcal": 902
+        },
+        {
+            "activity": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "sessions": 2,
+            "minutes": 50,
+            "kcal": 307
+        }
+    ],
+    "muscles": [
+        {
+            "key": "chest",
+            "name": "Chest",
+            "last": "2026-10-19",
+            "days_ago": 4,
+            "sessions": 1
+        },
+        {
+            "key": "back",
+            "name": "Back",
+            "last": "2026-10-20",
+            "days_ago": 3,
+            "sessions": 1
+        },
+        {
+            "key": "shoulders",
+            "name": "Shoulders",
+            "last": "2026-10-23",
+            "days_ago": 0,
+            "sessions": 2
+        },
+        {
+            "key": "biceps",
+            "name": "Biceps",
+            "last": "2026-10-20",
+            "days_ago": 3,
+            "sessions": 1
+        },
+        {
+            "key": "triceps",
+            "name": "Triceps",
+            "last": "2026-10-19",
+            "days_ago": 4,
+            "sessions": 1
+        },
+        {
+            "key": "legs",
+            "name": "Legs",
+            "last": "2026-10-22",
+            "days_ago": 1,
+            "sessions": 1
+        },
+        {
+            "key": "abs",
+            "name": "Abs",
+            "last": "2026-10-23",
+            "days_ago": 0,
+            "sessions": 3
+        }
+    ],
+    "workouts": [
+        {
+            "id": 47,
+            "date": "2026-10-23",
+            "activity": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "minutes": 40,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": 7.0,
+            "kcal": 481,
+            "kcal_manual": false,
+            "notes": "Tempo"
+        },
+        {
+            "id": 46,
+            "date": "2026-10-23",
+            "activity": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "minutes": 20,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 123,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 45,
+            "date": "2026-10-23",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "hard",
+            "muscles": [
+                "shoulders",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 410,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 44,
+            "date": "2026-10-22",
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "minutes": 20,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 150,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 43,
+            "date": "2026-10-22",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "moderate",
+            "muscles": [
+                "legs",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 328,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 42,
+            "date": "2026-10-20",
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "minutes": 30,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 226,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 41,
+            "date": "2026-10-20",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 90,
+            "intensity": "moderate",
+            "muscles": [
+                "back",
+                "biceps"
+            ],
+            "distance_km": null,
+            "kcal": 492,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 40,
+            "date": "2026-10-19",
+            "activity": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "minutes": 30,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 184,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 39,
+            "date": "2026-10-19",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 75,
+            "intensity": "moderate",
+            "muscles": [
+                "chest",
+                "triceps"
+            ],
+            "distance_km": null,
+            "kcal": 410,
+            "kcal_manual": false,
+            "notes": "Bench 80 kg 5×5"
+        },
+        {
+            "id": 38,
+            "date": "2026-10-18",
+            "activity": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "minutes": 35,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": 6.0,
+            "kcal": 421,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 37,
+            "date": "2026-10-17",
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "minutes": 30,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 226,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 36,
+            "date": "2026-10-17",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "hard",
+            "muscles": [
+                "shoulders",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 410,
+            "kcal_manual": false,
+            "notes": ""
+        }
+    ]
+}

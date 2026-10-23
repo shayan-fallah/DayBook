@@ -15,6 +15,9 @@
   --protein: #2a78d6;
   --carbs: #eb6834;
   --fat: #1baf7a;
+  --strength: #2a78d6;
+  --cardio: #eb6834;
+  --sport: #1baf7a;
   --good: #006300;
   --critical: #d03b3b;
   --critical-soft: rgba(208, 59, 59, 0.10);
@@ -39,6 +42,9 @@
     --protein: #3987e5;
     --carbs: #d95926;
     --fat: #199e70;
+    --strength: #3987e5;
+    --cardio: #d95926;
+    --sport: #199e70;
     --good: #0ca30c;
     --critical: #e66767;
     --critical-soft: rgba(230, 103, 103, 0.14);
@@ -350,3 +356,23 @@ td button { min-height: 26px; padding: 0 8px; font-size: 12px; }
   .hero-num { font-size: 34px; }
   .grid3 { grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 }
+
+/* ---------- workouts */
+.kind-strength { background: var(--strength); }
+.kind-cardio { background: var(--cardio); }
+.kind-other { background: var(--sport); }
+.chart .bar.kind-strength { fill: var(--strength); }
+.chart .bar.kind-cardio { fill: var(--cardio); }
+.chart .bar.kind-other { fill: var(--sport); }
+.hbar-row .track div.kind-cardio { background: var(--cardio); }
+.hbar-row .track div.kind-other { background: var(--sport); }
+.hbar-row .val.due { color: var(--ink); font-weight: 600; }
+.entry .swatch { align-self: center; }
+.entry-kcal small { font-weight: 400; color: var(--muted); font-size: 12px; }
+.entry-sub[dir="auto"] { text-align: left; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.meal-note { padding: 8px 16px 12px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 12px; }
+.field-label { font-size: 13px; color: var(--ink-2); margin-bottom: 6px; }
+.duration { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+.duration input { font-size: 18px; font-weight: 600; }
+#w-intensity-hint { margin: 6px 0 0; }
+#train-legend { margin-top: 10px; }

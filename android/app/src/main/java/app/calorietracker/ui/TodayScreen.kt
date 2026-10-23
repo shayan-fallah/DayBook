@@ -63,6 +63,7 @@ import java.time.ZoneOffset
 @Composable
 fun TodayScreen(vm: AppViewModel, onAdd: (String) -> Unit) {
     var editing by remember { mutableStateOf<Entry?>(null) }
+    var workoutSheet by remember { mutableStateOf<WorkoutTarget?>(null) }
     var pickDate by remember { mutableStateOf(false) }
     val day = vm.day
 
@@ -101,6 +102,7 @@ fun TodayScreen(vm: AppViewModel, onAdd: (String) -> Unit) {
             }
             item { SummaryCard(day) }
             item { TrackersCard(vm, day) }
+            item { WorkoutsCard(day) { w -> workoutSheet = WorkoutTarget(w, w?.date ?: day.date) } }
             items(MEALS, key = { it.first }) { (key, label) ->
                 MealCard(
                     label = label,
@@ -137,6 +139,8 @@ fun TodayScreen(vm: AppViewModel, onAdd: (String) -> Unit) {
             dismissButton = { TextButton(onClick = { pickDate = false }) { Text("Cancel") } },
         ) { DatePicker(state) }
     }
+
+    workoutSheet?.let { t -> WorkoutSheet(vm, t.workout, t.date) { workoutSheet = null } }
 
     editing?.let { entry ->
         if (entry.foodId != null) {
@@ -191,7 +195,7 @@ private fun SummaryCard(day: Day) {
         Meter(if (budget > 0) (tot.kcal / budget).toFloat() else 0f, if (over) p.critical else p.accent, height = 12.dp)
         Spacer(Modifier.height(10.dp))
         Text(
-            "${fmt(t.kcal)} goal  −  ${fmt(tot.kcal)} food  +  ${fmt(day.exercise.toDouble())} exercise",
+            "${fmt(t.kcal)} goal  −  ${fmt(tot.kcal)} food  +  ${fmt(day.exercise.toDouble())} workouts",
             style = MaterialTheme.typography.bodySmall,
             color = p.ink2,
         )
@@ -268,9 +272,7 @@ private fun TrackersCard(vm: AppViewModel, day: Day) {
         Spacer(Modifier.height(14.dp))
 
         var weightText by remember(day.date, day.weight) { mutableStateOf(day.weight?.trimmed() ?: "") }
-        var exerciseText by remember(day.date, day.exercise) { mutableStateOf(if (day.exercise > 0) day.exercise.toString() else "") }
         var weightFocused by remember { mutableStateOf(false) }
-        var exerciseFocused by remember { mutableStateOf(false) }
 
         fun saveWeight() {
             val raw = weightText.trim()
@@ -286,15 +288,6 @@ private fun TrackersCard(vm: AppViewModel, day: Day) {
             if (kg != day.weight) scope.launch { vm.saveWeight(kg) }
         }
 
-        fun saveExercise() {
-            val kcal = if (exerciseText.isBlank()) 0.0 else parseNum(exerciseText)
-            if (kcal == null || kcal < 0 || kcal > 10000) {
-                vm.toast("Enter exercise calories between 0 and 10,000")
-                return
-            }
-            if (kcal.toInt() != day.exercise) scope.launch { vm.saveExercise(kcal.toInt()) }
-        }
-
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             NumberField(
                 value = weightText,
@@ -308,19 +301,7 @@ private fun TrackersCard(vm: AppViewModel, day: Day) {
                 },
                 onDone = { focus.clearFocus() },
             )
-            NumberField(
-                value = exerciseText,
-                onValueChange = { exerciseText = it },
-                label = "Exercise",
-                suffix = "kcal",
-                placeholder = "0",
-                decimal = false,
-                modifier = Modifier.weight(1f).onFocusChanged {
-                    if (exerciseFocused && !it.isFocused) saveExercise()
-                    exerciseFocused = it.isFocused
-                },
-                onDone = { focus.clearFocus() },
-            )
+            Spacer(Modifier.weight(1f))
         }
     }
 }

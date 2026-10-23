@@ -23,6 +23,10 @@ import app.calorietracker.data.QuickLists
 import app.calorietracker.data.SearchReply
 import app.calorietracker.data.Stats
 import app.calorietracker.data.TokenReply
+import app.calorietracker.data.Workout
+import app.calorietracker.data.WorkoutMeta
+import app.calorietracker.data.WorkoutReply
+import app.calorietracker.data.WorkoutStats
 import app.calorietracker.data.jsonBody
 import app.calorietracker.data.normalizeServerUrl
 import app.calorietracker.data.urlEncode
@@ -66,6 +70,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var stats by mutableStateOf<Stats?>(null)
         private set
     var profile by mutableStateOf<Profile?>(null)
+        private set
+
+    // Gym
+    var workoutMeta by mutableStateOf<WorkoutMeta?>(null)
+        private set
+    var gymRange by mutableIntStateOf(30)
+        private set
+    var gym by mutableStateOf<WorkoutStats?>(null)
         private set
 
     init {
@@ -145,6 +157,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         quick = null
         stats = null
         profile = null
+        workoutMeta = null
+        gym = null
     }
 
     suspend fun changePassword(current: String, new: String): Boolean = act {
@@ -245,9 +259,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         toast(if (kg == null) "Weight removed" else "Weight saved")
     }
 
-    suspend fun saveExercise(kcal: Int): Boolean = act {
-        api.post<OkReply>("/api/days", jsonBody("date" to date.toString(), "exercise" to kcal))
+    // ------------------------------------------------------------ workouts
+
+    fun loadWorkoutMeta() = launchSafe { workoutMeta = api.get("/api/workouts/meta") }
+
+    /** The activity list for the workout form; loads it the first time. */
+    suspend fun ensureWorkoutMeta(): WorkoutMeta? = workoutMeta ?: try {
+        api.get<WorkoutMeta>("/api/workouts/meta").also { workoutMeta = it }
+    } catch (e: ApiException) {
+        handle(e)
+        null
+    }
+
+    fun loadGym(range: Int = gymRange) = launchSafe {
+        gymRange = range
+        val result: WorkoutStats = api.get("/api/workouts/stats?end=${LocalDate.now()}&days=$range")
+        if (range == gymRange) gym = result
+    }
+
+    /** Add (id = null) or update a workout. Returns the saved calories, or null on error. */
+    suspend fun saveWorkout(id: Long?, body: JsonObject): Int? = try {
+        val reply: WorkoutReply = if (id == null) api.post("/api/workouts", body) else api.patch("/api/workouts/$id", body)
+        afterWorkoutChange()
+        reply.kcal
+    } catch (e: ApiException) {
+        handle(e)
+        null
+    }
+
+    suspend fun deleteWorkout(w: Workout): Boolean = act {
+        api.delete<OkReply>("/api/workouts/${w.id}")
+        afterWorkoutChange()
+        toast("Workout deleted")
+    }
+
+    private fun afterWorkoutChange() {
         loadDay()
+        loadWorkoutMeta()
+        if (gym != null) loadGym()
     }
 
     // ------------------------------------------------------------ foods
@@ -310,6 +359,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val p: Profile = api.put("/api/profile", body)
         profile = p
         loadDay()
+        if (gym != null) loadGym()
         toast("Saved. Daily goal: ${app.calorietracker.ui.fmt(p.targets.kcal)} kcal")
     }
 }

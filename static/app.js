@@ -127,6 +127,8 @@ const state = {
   day: null,
   range: 30,
   stats: null,
+  gymRange: 30,
+  gym: null,
   quick: null,
   tab: 'recent',
   add: null, // { mode: 'add'|'edit', entry, food }
@@ -199,7 +201,7 @@ function showApp() {
 
 // ---------------------------------------------------------------- routing
 
-const VIEWS = ['today', 'history', 'foods', 'settings'];
+const VIEWS = ['today', 'gym', 'history', 'foods', 'settings'];
 
 function route() {
   if ($('#app').hidden) return;
@@ -208,6 +210,7 @@ function route() {
   $$('.tabbar a').forEach((a) => a.classList.toggle('on', a.dataset.view === view));
   window.scrollTo(0, 0);
   if (view === 'today') loadDay();
+  if (view === 'gym') loadGym();
   if (view === 'history') loadHistory();
   if (view === 'foods') loadFoods();
   if (view === 'settings') loadProfile();
@@ -295,9 +298,8 @@ function renderDay() {
     w.value = d.weight ?? '';
     w.placeholder = d.last_weight ? String(d.last_weight) : '—';
   }
-  const ex = $('#exercise-input');
-  if (document.activeElement !== ex) ex.value = d.exercise || '';
 
+  renderWorkouts();
   renderMeals();
 }
 
@@ -350,19 +352,8 @@ async function saveWeight() {
   if (ok) { toast(`Weight saved: ${fmt1(kg)} kg`); loadDay(); }
 }
 
-async function saveExercise() {
-  const input = $('#exercise-input');
-  const kcal = input.value.trim() === '' ? 0 : toNum(input.value);
-  if (!(kcal >= 0 && kcal <= 10000)) { toast('Enter exercise calories between 0 and 10,000', true); return; }
-  if (Math.round(kcal) === (state.day.exercise || 0)) return;
-  const ok = await run(() => api('POST', '/api/days', { date: state.day.date, exercise: Math.round(kcal) }));
-  if (ok) loadDay();
-}
-
-for (const [id, fn] of [['#weight-input', saveWeight], ['#exercise-input', saveExercise]]) {
-  $(id).addEventListener('change', fn);
-  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
-}
+$('#weight-input').addEventListener('change', saveWeight);
+$('#weight-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
 /** Unit names are Persian; isolate them so they don't scramble the English text around them. */
 const bdi = (t) => el('bdi', {}, t);
@@ -814,6 +805,381 @@ $('#food-delete').addEventListener('click', async () => {
   if (ok) { foodDlg.close(); toast('Food deleted'); loadFoods(); }
 });
 
+// ---------------------------------------------------------------- workouts
+
+const KINDS = [['strength', 'Strength'], ['cardio', 'Cardio'], ['other', 'Other']];
+const INTENSITY_NAME = { light: 'Easy', moderate: 'Moderate', hard: 'Hard' };
+const INTENSITY_INDEX = { light: 0, moderate: 1, hard: 2 };
+const INTENSITY_HINT = {
+  strength: 'Easy: light weights, long rests. Hard: heavy sets, supersets, short rests.',
+  cardio: 'Easy: you could sing. Moderate: you can still talk. Hard: only a few words at a time.',
+  other: 'How hard it felt overall.',
+};
+const MUSCLE_NAME = {
+  chest: 'Chest', back: 'Back', shoulders: 'Shoulders', biceps: 'Biceps', triceps: 'Triceps',
+  legs: 'Legs', abs: 'Abs', full_body: 'Full body',
+};
+const DURATIONS = [30, 45, 60, 75, 90, 120];
+
+function duration(min) {
+  if (min == null) return '';
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h ? (m ? `${h} h ${m} min` : `${h} h`) : `${m} min`;
+}
+
+function workoutSub(w, withDate) {
+  const parts = [];
+  if (withDate) parts.push(longDate(w.date));
+  if (w.minutes != null) parts.push(duration(w.minutes), INTENSITY_NAME[w.intensity] || w.intensity);
+  if (w.muscles.length) parts.push(w.muscles.map((m) => MUSCLE_NAME[m] || m).join(', '));
+  if (w.distance_km) {
+    let d = `${fmt1(w.distance_km)} km`;
+    if (w.activity === 'running' && w.minutes) {
+      const pace = w.minutes / w.distance_km;
+      d += ` (${Math.floor(pace)}:${pad(Math.round((pace % 1) * 60) % 60)} /km)`;
+    }
+    parts.push(d);
+  }
+  if (w.minutes == null) parts.push('Calories only');
+  if (w.notes) parts.push(w.notes);
+  return parts.join(' · ');
+}
+
+function workoutButton(w, withDate) {
+  return el('button', { class: 'entry', type: 'button', onclick: () => openWorkout(w) },
+    el('i', { class: `swatch kind-${w.kind}`, title: w.kind }),
+    el('span', { class: 'entry-main' },
+      el('span', { class: 'entry-name', dir: 'auto' }, w.name),
+      el('span', { class: 'entry-sub', dir: 'auto' }, workoutSub(w, withDate))),
+    el('span', { class: 'entry-kcal' }, fmt(w.kcal), el('small', {}, ' kcal')));
+}
+
+function renderWorkouts() {
+  const d = state.day;
+  const list = d.workouts || [];
+  const total = list.reduce((s, w) => s + (w.minutes || 0), 0);
+  const head = el('div', { class: 'meal-head' },
+    el('h3', {}, 'Workouts'),
+    list.length ? el('span', { class: 'meal-kcal' }, [total ? `${duration(total)} · ` : '', `${fmt(d.burned)} kcal`]) : null,
+    el('button', { class: 'primary', type: 'button', onclick: () => openWorkout(null, d.date) }, '+ Add'));
+  const body = list.length
+    ? el('ul', { class: 'entries' }, list.map((w) => el('li', {}, workoutButton(w))))
+    : el('div', { class: 'meal-empty' }, 'No workout logged. Rest day?');
+  const note = list.length && d.exercise_pct < 100
+    ? el('div', { class: 'meal-note' }, d.exercise_pct
+      ? `Half of it (${fmt(d.exercise)} kcal) is added to your goal.`
+      : 'Not added to your calorie goal (see Settings).')
+    : null;
+  $('#workouts').replaceChildren(el('div', { class: 'card meal' }, head, body, note));
+}
+
+let workoutMeta = null;
+async function loadWorkoutMeta() {
+  const m = await run(() => api('GET', '/api/workouts/meta'));
+  if (m) workoutMeta = m;
+  return workoutMeta;
+}
+const activityOf = (key) => workoutMeta.activities.find((a) => a.key === key)
+  || workoutMeta.activities[workoutMeta.activities.length - 1];
+
+const wDlg = $('#workout-dlg');
+const wf = $('#workout-form');
+const ws = { edit: null, date: null, kind: 'strength', activity: 'bodybuilding', intensity: 'moderate', muscles: new Set() };
+
+$('#workout-close').addEventListener('click', () => wDlg.close());
+wDlg.addEventListener('click', (e) => { if (e.target === wDlg) wDlg.close(); });
+$('#gym-add').addEventListener('click', () => openWorkout(null, todayISO()));
+
+async function openWorkout(w, date) {
+  if (!workoutMeta) await loadWorkoutMeta();
+  else loadWorkoutMeta().then(() => { if (wDlg.open && !ws.edit) renderRecent(); });
+  if (!workoutMeta) return;
+  ws.edit = w;
+  ws.date = w ? w.date : date;
+  wf.reset();
+  $('#workout-error').textContent = '';
+  fillWorkout(w || { activity: 'bodybuilding', intensity: 'moderate', minutes: 60, muscles: [] }, !!w);
+  $('#workout-title').textContent = w ? `Edit workout · ${shortDate(w.date)}`
+    : ws.date === todayISO() ? 'Log workout' : `Log workout · ${shortDate(ws.date)}`;
+  $('#workout-delete').hidden = !w;
+  $('#workout-save').textContent = w ? 'Save' : 'Add';
+  renderRecent();
+  wDlg.showModal();
+}
+
+function fillWorkout(src, editing) {
+  const a = activityOf(src.activity);
+  ws.activity = a.key;
+  ws.kind = a.kind;
+  ws.intensity = src.intensity || 'moderate';
+  ws.muscles = new Set(src.muscles || []);
+  wf.wname.value = a.key === 'other' ? (src.name || '') : '';
+  wf.hours.value = src.minutes != null ? Math.floor(src.minutes / 60) : '';
+  wf.mins.value = src.minutes != null ? src.minutes % 60 : '';
+  wf.distance.value = src.distance_km ?? '';
+  wf.kcal.value = editing && src.kcal_manual ? src.kcal : '';
+  wf.notes.value = editing ? src.notes || '' : '';
+  renderWorkoutForm();
+}
+
+function renderRecent() {
+  const recent = ws.edit ? [] : workoutMeta.recent.slice(0, 4);
+  $('#w-recent-row').hidden = !recent.length;
+  $('#w-recent').replaceChildren(...recent.map((r) => el('button', {
+    type: 'button', onclick: () => fillWorkout(r, false),
+  }, el('span', {}, el('bdi', {}, r.name), ` · ${duration(r.minutes)}`,
+    r.muscles.length ? ` · ${r.muscles.map((m) => MUSCLE_NAME[m] || m).join(', ')}` : ''))));
+}
+
+/** Minutes from the hours + minutes boxes; NaN when both are empty or invalid. */
+function workoutMinutes() {
+  const hRaw = wf.hours.value.trim();
+  const mRaw = wf.mins.value.trim();
+  if (!hRaw && !mRaw) return NaN;
+  const h = hRaw ? toNum(hRaw) : 0;
+  const m = mRaw ? toNum(mRaw) : 0;
+  return Math.round(h * 60 + m);
+}
+
+function renderWorkoutForm() {
+  const a = activityOf(ws.activity);
+  $$('#w-kind button').forEach((b) => b.classList.toggle('on', b.dataset.kind === ws.kind));
+  $('#w-activities').replaceChildren(...workoutMeta.activities.filter((x) => x.kind === ws.kind).map((x) => el('button', {
+    type: 'button', class: x.key === ws.activity ? 'on' : null, 'aria-pressed': String(x.key === ws.activity),
+    onclick: () => { ws.activity = x.key; renderWorkoutForm(); },
+  }, x.key === 'other' ? 'Other…' : x.name)));
+  $('#w-name-row').hidden = a.key !== 'other';
+  $('#w-distance-row').hidden = !a.distance;
+  $('#w-muscles-row').hidden = a.kind !== 'strength';
+  $('#w-muscles').replaceChildren(...workoutMeta.muscles.map((m) => el('button', {
+    type: 'button', class: ws.muscles.has(m.key) ? 'on' : null, 'aria-pressed': String(ws.muscles.has(m.key)),
+    onclick: () => {
+      if (ws.muscles.has(m.key)) ws.muscles.delete(m.key); else ws.muscles.add(m.key);
+      renderWorkoutForm();
+    },
+  }, m.name)));
+  $$('#w-intensity button').forEach((b) => b.classList.toggle('on', b.dataset.int === ws.intensity));
+  $('#w-intensity-hint').textContent = INTENSITY_HINT[a.kind];
+  const min = workoutMinutes();
+  $('#w-durations').replaceChildren(...DURATIONS.map((d) => el('button', {
+    type: 'button', class: d === min ? 'on' : null,
+    onclick: () => { wf.hours.value = Math.floor(d / 60); wf.mins.value = d % 60; renderWorkoutForm(); },
+  }, duration(d))));
+  updateWorkoutPreview();
+}
+
+function workoutEstimate() {
+  const min = workoutMinutes();
+  if (!(min > 0)) return null;
+  const met = activityOf(ws.activity).met[INTENSITY_INDEX[ws.intensity]];
+  return Math.round((met - 1) * (workoutMeta.weight || workoutMeta.default_weight) * (min / 60));
+}
+
+function updateWorkoutPreview() {
+  const est = workoutEstimate();
+  wf.kcal.placeholder = est != null ? `${est} (estimate)` : '';
+  const typed = wf.kcal.value.trim() !== '';
+  const kg = workoutMeta.weight;
+  const how = typed ? 'your number'
+    : kg ? `estimated for ${fmt1(kg)} kg body weight`
+      : `estimated for ${workoutMeta.default_weight} kg. Log your weight for a better estimate`;
+  $('#w-preview').replaceChildren(
+    el('div', { class: 'preview-kcal' }, el('b', {}, typed ? fmt(toNum(wf.kcal.value)) : fmt(est)), ' kcal burned'),
+    el('div', { class: 'hint' }, how[0].toUpperCase() + how.slice(1)));
+}
+
+$$('#w-kind button').forEach((b) => b.addEventListener('click', () => {
+  if (ws.kind === b.dataset.kind) return;
+  ws.kind = b.dataset.kind;
+  ws.activity = workoutMeta.activities.find((a) => a.kind === ws.kind).key;
+  renderWorkoutForm();
+}));
+$$('#w-intensity button').forEach((b) => b.addEventListener('click', () => {
+  ws.intensity = b.dataset.int;
+  renderWorkoutForm();
+}));
+for (const name of ['hours', 'mins']) wf[name].addEventListener('input', renderWorkoutForm);
+wf.kcal.addEventListener('input', updateWorkoutPreview);
+
+wf.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#workout-error');
+  const a = activityOf(ws.activity);
+  const min = workoutMinutes();
+  const keepNoDuration = ws.edit && ws.edit.minutes == null && isNaN(min);
+  if (!keepNoDuration && !(min >= 1 && min <= 1440)) { err.textContent = 'Enter how long you trained.'; return; }
+  const body = { date: ws.date, activity: a.key, intensity: ws.intensity, muscles: [...ws.muscles], notes: wf.notes.value.trim() };
+  if (!keepNoDuration) body.minutes = min;
+  if (a.key === 'other') body.name = wf.wname.value.trim();
+  if (a.distance) {
+    const km = wf.distance.value.trim() === '' ? null : toNum(wf.distance.value);
+    if (km != null && !(km >= 0)) { err.textContent = 'Check the distance.'; return; }
+    body.distance_km = km;
+  }
+  const kcal = wf.kcal.value.trim() === '' ? null : toNum(wf.kcal.value);
+  if (kcal != null && !(kcal >= 0)) { err.textContent = 'Check the calories.'; return; }
+  body.kcal = kcal;
+  const res = await run(() => (ws.edit
+    ? api('PATCH', `/api/workouts/${ws.edit.id}`, body)
+    : api('POST', '/api/workouts', body)), err);
+  if (!res) return;
+  wDlg.close();
+  toast(ws.edit ? 'Workout saved' : `Logged ${a.key === 'other' ? body.name : a.name} · ${fmt(res.kcal)} kcal`);
+  afterWorkoutChange();
+});
+
+$('#workout-delete').addEventListener('click', async () => {
+  const w = ws.edit;
+  if (!w || !confirm(`Delete ${w.name} on ${longDate(w.date)}?`)) return;
+  if (await run(() => api('DELETE', `/api/workouts/${w.id}`))) {
+    wDlg.close();
+    toast('Workout deleted');
+    afterWorkoutChange();
+  }
+});
+
+function afterWorkoutChange() {
+  loadWorkoutMeta();
+  if (!$('#view-today').hidden) loadDay();
+  if (!$('#view-gym').hidden) loadGym();
+}
+
+// --- gym tab
+
+$$('#gym-range button').forEach((b) => b.addEventListener('click', () => {
+  state.gymRange = Number(b.dataset.days);
+  loadGym();
+}));
+
+async function loadGym() {
+  $$('#gym-range button').forEach((b) => b.classList.toggle('on', Number(b.dataset.days) === state.gymRange));
+  const s = await run(() => api('GET', `/api/workouts/stats?end=${todayISO()}&days=${state.gymRange}`));
+  if (!s) return;
+  state.gym = s;
+  renderGym();
+}
+
+const hoursText = (min) => `${fmt1(min / 60)} h`;
+const agoText = (n) => (n == null ? 'Not yet' : n === 0 ? 'Today' : n === 1 ? 'Yesterday' : `${n} days ago`);
+
+function renderGym() {
+  const s = state.gym;
+  const t = s.totals;
+  const wk = s.week;
+  const weeks = Math.max(1, (daysBetween(s.start, s.end) + 1) / 7);
+  const left = wk.goal - wk.days;
+  $('#gym-tiles').replaceChildren(
+    tile('Last 7 days', `${wk.days}`, `/ ${wk.goal} days`, left > 0 ? `${left} more for your goal` : 'Weekly goal reached'),
+    tile('Goal streak', `${s.goal_streak}`, s.goal_streak === 1 ? 'week' : 'weeks', `Weeks with ${wk.goal}+ training days`),
+    tile('Training time', fmt1(t.minutes / 60 / weeks), 'h / week', `${hoursText(t.minutes)} in ${t.sessions} session${t.sessions === 1 ? '' : 's'}`),
+    tile('Burned', fmt(t.kcal), 'kcal', t.sessions ? `About ${fmt(t.kcal / t.sessions)} per session` : 'No workouts yet'));
+
+  $('#train-sub').textContent = s.bucket_days === 1 ? 'Hours per day.' : 'Hours per week.';
+  drawTrainingChart($('#train-chart'), s);
+  $('#train-legend').replaceChildren(...(t.minutes ? KINDS.map(([k, label]) => el('div', { class: 'legend-row' },
+    el('i', { class: `swatch kind-${k}` }),
+    el('span', { class: 'name' }, label),
+    el('span', { class: 'val' }, `${hoursText(t[k])} · ${Math.round((t[k] / t.minutes) * 100)}%`))) : []));
+  $('#train-table').replaceChildren(el('div', { class: 'table-scroll' }, el('table', {},
+    el('thead', {}, el('tr', {}, [s.bucket_days === 1 ? 'Day' : 'Week of', 'Strength', 'Cardio', 'Other', 'kcal'].map((h) => el('th', {}, h)))),
+    el('tbody', {}, s.buckets.filter((b) => b.sessions).reverse().map((b) => el('tr', {},
+      el('td', {}, longDate(b.start)), el('td', {}, duration(b.strength) || '–'), el('td', {}, duration(b.cardio) || '–'),
+      el('td', {}, duration(b.other) || '–'), el('td', {}, fmt(b.kcal))))))));
+
+  const maxM = Math.max(1, ...s.muscles.map((m) => m.sessions));
+  $('#gym-muscles').replaceChildren(...s.muscles.map((m) => el('div', { class: 'hbar-row' },
+    el('span', { class: 'name' }, m.name),
+    el('span', { class: `val${m.days_ago == null || m.days_ago >= 7 ? ' due' : ''}` },
+      `${agoText(m.days_ago)} · ${m.sessions}×`),
+    el('div', { class: 'track' }, el('div', { class: 'kind-strength', style: `width:${(m.sessions / maxM) * 100}%` })))));
+
+  const acts = s.by_activity;
+  const maxA = acts.length ? acts[0].minutes || 1 : 1;
+  $('#gym-activities').replaceChildren(...(acts.length ? acts.map((a) => el('div', { class: 'hbar-row' },
+    el('span', { class: 'name', dir: 'auto' }, a.name),
+    el('span', { class: 'val' }, `${a.minutes ? duration(a.minutes) : '–'} · ${a.sessions}× · ${fmt(a.kcal)} kcal`),
+    el('div', { class: 'track' }, el('div', { class: `kind-${a.kind}`, style: `width:${(a.minutes / maxA) * 100}%` }))))
+    : [el('p', { class: 'chart-empty' }, 'No workouts in this period.')]));
+
+  $('#gym-log').replaceChildren(s.workouts.length
+    ? el('ul', { class: 'entries' }, s.workouts.map((w) => el('li', {}, workoutButton(w, true))))
+    : el('div', { class: 'meal-empty' }, 'No workouts in this period.'));
+}
+
+function drawTrainingChart(box, s) {
+  const bs = s.buckets;
+  if (!s.totals.minutes) { box.replaceChildren(el('p', { class: 'chart-empty' }, 'No workouts in this period.')); return; }
+  const W = Math.max(280, box.clientWidth || 320);
+  const H = 190;
+  const m = { l: 36, r: 8, t: 12, b: 24 };
+  const iw = W - m.l - m.r;
+  const ih = H - m.t - m.b;
+  const totalOf = (b) => b.strength + b.cardio + b.other;
+  const maxH = Math.max(1, ...bs.map((b) => totalOf(b) / 60));
+  const step = niceStep(maxH * 1.08);
+  const top = Math.ceil((maxH * 1.08) / step) * step;
+  const y = (h) => m.t + ih - (h / top) * ih;
+  const slot = iw / bs.length;
+  const bw = Math.max(1, Math.min(24, slot * 0.7, slot - 2));
+
+  const g = [];
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    g.push(svg('line', { class: v === 0 ? 'base' : 'grid', x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }));
+    g.push(svg('text', { x: m.l - 6, y: y(v) + 4, 'text-anchor': 'end' }, `${fmt1(v)} h`));
+  }
+  const n = bs.length;
+  const every = n <= 7 ? 1 : n <= 14 ? 4 : n <= 31 ? 7 : 9;
+  bs.forEach((b, i) => {
+    if ((n - 1 - i) % every) return;
+    const label = s.bucket_days === 1 && n <= 7
+      ? dateOf(b.start).toLocaleDateString('en-US', { weekday: 'short' }) : shortDate(b.start);
+    g.push(svg('text', { x: m.l + slot * i + slot / 2, y: H - 6, 'text-anchor': 'middle' }, label));
+  });
+  const hoverCol = svg('rect', { class: 'hover-col', y: m.t, height: ih, width: slot, visibility: 'hidden' });
+  g.push(hoverCol);
+  bs.forEach((b, i) => {
+    const x0 = m.l + slot * i + (slot - bw) / 2;
+    const parts = KINDS.map(([k]) => [k, b[k]]).filter(([, v]) => v > 0);
+    let acc = 0;
+    parts.forEach(([k, v], j) => {
+      const y1 = y(acc / 60);
+      acc += v;
+      const y0 = y(acc / 60);
+      const gap = j > 0 ? 2 : 0; // surface gap between stacked segments
+      const h = Math.max(1, y1 - y0 - gap);
+      if (j === parts.length - 1) g.push(svg('path', { class: `bar kind-${k}`, d: colPath(x0, y0, bw, h) }));
+      else g.push(svg('rect', { class: `bar kind-${k}`, x: x0, y: y0, width: bw, height: h }));
+    });
+  });
+
+  const hit = svg('rect', { class: 'hit', x: m.l, y: m.t, width: iw, height: ih });
+  const onMove = (evt) => {
+    const pt = evt.touches ? evt.touches[0] : evt;
+    const rect = hit.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.floor(((pt.clientX - rect.left) / rect.width) * n)));
+    const b = bs[i];
+    hoverCol.setAttribute('x', m.l + slot * i);
+    hoverCol.setAttribute('visibility', 'visible');
+    const title = b.start === b.end ? longDate(b.start) : `${shortDate(b.start)} – ${shortDate(b.end)}`;
+    const lines = [el('b', {}, title), el('br')];
+    if (!b.sessions) lines.push('Rest');
+    else {
+      KINDS.forEach(([k, label]) => { if (b[k]) lines.push(`${label}: ${duration(b[k])}`, el('br')); });
+      lines.push(`${b.sessions} session${b.sessions === 1 ? '' : 's'} · ${fmt(b.kcal)} kcal`);
+    }
+    showTip(evt, lines);
+  };
+  const onLeave = () => { hoverCol.setAttribute('visibility', 'hidden'); hideTip(); };
+  hit.addEventListener('mousemove', onMove);
+  hit.addEventListener('touchstart', onMove, { passive: true });
+  hit.addEventListener('touchmove', onMove, { passive: true });
+  hit.addEventListener('mouseleave', onLeave);
+  hit.addEventListener('touchend', () => setTimeout(onLeave, 1500));
+  g.push(hit);
+  box.replaceChildren(svg('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Training time chart' }, g));
+}
+
 // ---------------------------------------------------------------- history
 
 $$('#range button').forEach((b) => b.addEventListener('click', () => {
@@ -1115,6 +1481,7 @@ window.addEventListener('resize', debounce(() => {
     drawKcalChart($('#kcal-chart'), state.stats);
     drawWeightChart($('#weight-chart'), state.stats);
   }
+  if (!$('#view-gym').hidden && state.gym) drawTrainingChart($('#train-chart'), state.gym);
 }, 150));
 
 // ---------------------------------------------------------------- settings
@@ -1138,6 +1505,8 @@ async function loadProfile() {
   f.carbs_pct.value = p.carbs_pct;
   f.fat_pct.value = p.fat_pct;
   f.water_goal.value = p.water_goal;
+  f.workout_goal.value = p.workout_goal ?? 4;
+  f.exercise_pct.value = String(p.exercise_pct ?? 100);
   $('#profile-error').textContent = '';
   updateCalc();
 }
@@ -1198,6 +1567,8 @@ $('#profile-form').addEventListener('submit', async (e) => {
     carbs_pct: n(f.carbs_pct.value),
     fat_pct: n(f.fat_pct.value),
     water_goal: n(f.water_goal.value),
+    workout_goal: n(f.workout_goal.value) ?? 4,
+    exercise_pct: Number(f.exercise_pct.value),
     date: todayISO(),
   };
   for (const [k, v] of Object.entries(body)) {

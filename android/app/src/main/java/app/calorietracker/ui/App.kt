@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val icon: ImageVector) {
     Today("Today", Icons.Filled.Home),
+    Gym("Gym", DumbbellIcon),
     History("History", Icons.Filled.DateRange),
     Foods("Foods", Icons.AutoMirrored.Filled.List),
     Settings("Settings", Icons.Filled.Settings),
@@ -100,6 +101,7 @@ fun CalorieApp(vm: AppViewModel = viewModel()) {
         ) {
             when (tab) {
                 Tab.Today -> TodayScreen(vm, onAdd = { addMeal = it })
+                Tab.Gym -> GymScreen(vm)
                 Tab.History -> HistoryScreen(vm)
                 Tab.Foods -> FoodsScreen(vm, onPick = { quickFood = it })
                 Tab.Settings -> SettingsScreen(vm)

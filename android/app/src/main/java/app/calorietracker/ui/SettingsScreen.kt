@@ -62,6 +62,12 @@ private val RATES = listOf(
     "-0.25" to "Lose 0.25 kg / week", "0" to "Maintain weight", "0.25" to "Gain 0.25 kg / week", "0.5" to "Gain 0.5 kg / week",
 )
 
+private val EXERCISE_PCT = listOf(
+    "100" to "Add all of them to my daily goal",
+    "50" to "Add half (estimates often run high)",
+    "0" to "Don't add them",
+)
+
 @Composable
 fun SettingsScreen(vm: AppViewModel) {
     LaunchedEffect(Unit) { vm.loadProfile() }
@@ -91,7 +97,7 @@ fun SettingsScreen(vm: AppViewModel) {
         }
         AppCard {
             CardTitle("Your data")
-            SubText("Download your food log and weights as CSV from the web version: Settings → Your data.")
+            SubText("Download your food log, weights and workouts as CSV from the web version: Settings → Your data.")
         }
         Text(
             "Food data from Fig Fit (figfit.ir), licensed CC BY-NC-SA 4.0.",
@@ -121,6 +127,8 @@ private fun ProfileForm(vm: AppViewModel, profile: Profile) {
     var carbsPct by remember(profile) { mutableStateOf(profile.carbsPct.toString()) }
     var fatPct by remember(profile) { mutableStateOf(profile.fatPct.toString()) }
     var water by remember(profile) { mutableStateOf(profile.waterGoal.toString()) }
+    var workoutGoal by remember(profile) { mutableStateOf(profile.workoutGoal.toString()) }
+    var exercisePct by remember(profile) { mutableStateOf(profile.exercisePct.toString()) }
     var busy by remember { mutableStateOf(false) }
 
     // Live preview, same formula as the server (Mifflin-St Jeor).
@@ -161,6 +169,7 @@ private fun ProfileForm(vm: AppViewModel, profile: Profile) {
                 NumberField(weight, { weight = it }, "Weight", Modifier.weight(1f), suffix = "kg", placeholder = "75")
             }
             OptionDropdown("Activity", ACTIVITY, activity) { activity = it }
+            SubText("If you log workouts, pick the level for your days without them, so they aren't counted twice.", color = p.muted)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OptionDropdown("Goal", RATES, rate, Modifier.weight(1.4f)) { rate = it }
                 NumberField(targetWeight, { targetWeight = it }, "Goal weight", Modifier.weight(1f), suffix = "kg", placeholder = "optional")
@@ -193,6 +202,12 @@ private fun ProfileForm(vm: AppViewModel, profile: Profile) {
                 )
             }
             NumberField(water, { water = it }, "Water goal (glasses of 250 ml)", Modifier.fillMaxWidth(), decimal = false)
+
+            Spacer(Modifier.height(4.dp))
+            CardTitle("Training")
+            NumberField(workoutGoal, { workoutGoal = it }, "Training days per week (goal)", Modifier.fillMaxWidth(), decimal = false, placeholder = "4")
+            OptionDropdown("Workout calories", EXERCISE_PCT, exercisePct) { exercisePct = it }
+            SubText("Burned calories raise how much you can eat that day.", color = p.muted)
             Button(
                 enabled = !busy && sum == 100,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
@@ -203,6 +218,7 @@ private fun ProfileForm(vm: AppViewModel, profile: Profile) {
                         "activity" to activity, "rate_kg_week" to rate.toDouble(), "target_weight" to opt(targetWeight),
                         "calorie_goal" to opt(goal), "protein_pct" to opt(proteinPct), "carbs_pct" to opt(carbsPct),
                         "fat_pct" to opt(fatPct), "water_goal" to opt(water), "date" to LocalDate.now().toString(),
+                        "workout_goal" to (opt(workoutGoal) ?: 4), "exercise_pct" to exercisePct.toInt(),
                     )
                     if (body.values.any { it.toString() == "NaN" }) return@Button vm.toast("Check the numbers")
                     busy = true

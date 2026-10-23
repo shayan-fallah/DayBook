@@ -1,0 +1,98 @@
+{
+    "date": "2026-10-23",
+    "entries": [
+        {
+            "id": 41,
+            "date": "2026-10-23",
+            "meal": "lunch",
+            "food_id": null,
+            "name": "Lunch",
+            "unit": null,
+            "qty": null,
+            "grams": null,
+            "kcal": 1925.0,
+            "protein": 150.0,
+            "carbs": 250.0,
+            "fat": 70.0,
+            "fiber": 0,
+            "sugar": 0,
+            "sodium": 0
+        }
+    ],
+    "totals": {
+        "kcal": 1925.0,
+        "protein": 150.0,
+        "carbs": 250.0,
+        "fat": 70.0,
+        "fiber": 0,
+        "sugar": 0,
+        "sodium": 0
+    },
+    "targets": {
+        "kcal": 2480,
+        "protein": 155,
+        "carbs": 279,
+        "fat": 83,
+        "fiber": 35,
+        "sugar": 50,
+        "sodium": 2300,
+        "water": 8,
+        "bmr": 1805,
+        "tdee": 2482,
+        "suggested": 2480,
+        "manual": false
+    },
+    "water": 0,
+    "exercise": 1014,
+    "burned": 1014,
+    "exercise_pct": 100,
+    "workouts": [
+        {
+            "id": 45,
+            "date": "2026-10-23",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "hard",
+            "muscles": [
+                "shoulders",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 410,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 46,
+            "date": "2026-10-23",
+            "activity": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "minutes": 20,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 123,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 47,
+            "date": "2026-10-23",
+            "activity": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "minutes": 40,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": 7.0,
+            "kcal": 481,
+            "kcal_manual": false,
+            "notes": "Tempo"
+        }
+    ],
+    "weight": null,
+    "last_weight": 82.0
+}

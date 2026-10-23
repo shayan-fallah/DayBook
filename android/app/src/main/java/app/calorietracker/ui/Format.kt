@@ -96,3 +96,53 @@ fun dateLabel(d: LocalDate): String {
 }
 
 fun Double.trimmed(): String = fmt1(this).replace(",", "")
+
+// ---------------------------------------------------------------- workouts
+
+val INTENSITY_NAME = mapOf("light" to "Easy", "moderate" to "Moderate", "hard" to "Hard")
+val INTENSITY_INDEX = mapOf("light" to 0, "moderate" to 1, "hard" to 2)
+val MUSCLE_NAME = mapOf(
+    "chest" to "Chest", "back" to "Back", "shoulders" to "Shoulders", "biceps" to "Biceps", "triceps" to "Triceps",
+    "legs" to "Legs", "abs" to "Abs", "full_body" to "Full body",
+)
+val DURATIONS = listOf(30, 45, 60, 75, 90, 120)
+
+/** 95 -> "1 h 35 min". */
+fun duration(min: Int?): String {
+    if (min == null) return ""
+    val h = min / 60
+    val m = min % 60
+    return if (h == 0) "$m min" else if (m == 0) "$h h" else "$h h $m min"
+}
+
+fun hoursText(min: Int) = "${fmt1(min / 60.0)} h"
+
+fun agoText(days: Int?) = when (days) {
+    null -> "Not yet"
+    0 -> "Today"
+    1 -> "Yesterday"
+    else -> "$days days ago"
+}
+
+fun workoutSub(w: app.calorietracker.data.Workout, withDate: Boolean = false): String {
+    val parts = mutableListOf<String>()
+    if (withDate) parts += longDate(w.date)
+    if (w.minutes != null) {
+        parts += duration(w.minutes)
+        parts += INTENSITY_NAME[w.intensity] ?: w.intensity
+    }
+    if (w.muscles.isNotEmpty()) parts += w.muscles.joinToString(", ") { MUSCLE_NAME[it] ?: it }
+    val km = w.distanceKm
+    if (km != null && km > 0) {
+        var d = "${fmt1(km)} km"
+        if (w.activity == "running" && w.minutes != null) {
+            val pace = w.minutes / km
+            val sec = Math.round((pace - floor(pace)) * 60).toInt() % 60
+            d += String.format(Locale.US, " (%d:%02d /km)", floor(pace).toInt(), sec)
+        }
+        parts += d
+    }
+    if (w.minutes == null) parts += "Calories only"
+    if (w.notes.isNotBlank()) parts += w.notes
+    return parts.joinToString(" · ")
+}

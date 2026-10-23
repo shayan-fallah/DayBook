@@ -75,15 +75,45 @@
             <span class="tracker-label">Weight</span>
             <span class="input-unit"><input id="weight-input" inputmode="decimal" autocomplete="off"><span>kg</span></span>
           </label>
-          <label class="tracker">
-            <span class="tracker-label">Exercise</span>
-            <span class="input-unit"><input id="exercise-input" inputmode="numeric" autocomplete="off" placeholder="0"><span>kcal</span></span>
-          </label>
         </div>
       </div>
 
+      <div id="workouts"></div>
+
       <div id="meals"></div>
       <div id="day-actions" class="day-actions"></div>
+    </section>
+
+    <!-- GYM -->
+    <section id="view-gym" class="view" hidden>
+      <button class="primary wide" id="gym-add" type="button">+ Log workout</button>
+      <div class="seg" id="gym-range" role="group" aria-label="Time range">
+        <button data-days="7">7 days</button>
+        <button data-days="30">30 days</button>
+        <button data-days="90">90 days</button>
+        <button data-days="365">1 year</button>
+      </div>
+      <div class="tiles" id="gym-tiles"></div>
+      <div class="card">
+        <h2>Training time</h2>
+        <p class="sub" id="train-sub"></p>
+        <div class="chart" id="train-chart"></div>
+        <div class="legend" id="train-legend"></div>
+        <details class="table-view"><summary>Show as table</summary><div id="train-table"></div></details>
+      </div>
+      <div class="card">
+        <h2>Muscle groups</h2>
+        <p class="sub">When you last trained each one, and how often in this period.</p>
+        <div id="gym-muscles"></div>
+      </div>
+      <div class="card">
+        <h2>Activities</h2>
+        <div id="gym-activities"></div>
+      </div>
+      <div class="card meal">
+        <div class="meal-head"><h3>Workout log</h3></div>
+        <div id="gym-log"></div>
+      </div>
     </section>
 
     <!-- HISTORY -->
@@ -161,6 +191,7 @@
             <option value="active">Active: exercise 6–7 days/week</option>
             <option value="very">Very active: physical job or 2×/day training</option>
           </select>
+          <span class="hint">If you log workouts here, pick the level for your days without them, so they aren't counted twice.</span>
         </label>
         <label>Goal
             <select name="rate_kg_week">
@@ -188,6 +219,17 @@
         </div>
         <p class="hint" id="pct-sum"></p>
         <label>Water goal (glasses of 250 ml) <input name="water_goal" inputmode="numeric"></label>
+
+        <h2>Training</h2>
+        <label>Training days per week (goal) <input name="workout_goal" inputmode="numeric" placeholder="4"></label>
+        <label>Workout calories
+          <select name="exercise_pct">
+            <option value="100">Add all of them to my daily calorie goal</option>
+            <option value="50">Add half (estimates often run high)</option>
+            <option value="0">Don't add them</option>
+          </select>
+          <span class="hint">Burned calories raise how much you can eat that day.</span>
+        </label>
         <p class="error" id="profile-error" role="alert"></p>
         <button class="primary wide">Save</button>
       </form>
@@ -197,6 +239,7 @@
         <div class="btn-row">
           <a class="btn" href="/api/export?type=entries" download>Download food log (CSV)</a>
           <a class="btn" href="/api/export?type=weights" download>Download weights (CSV)</a>
+          <a class="btn" href="/api/export?type=workouts" download>Download workouts (CSV)</a>
         </div>
       </div>
 
@@ -218,6 +261,7 @@
 
   <nav class="tabbar" aria-label="Main">
     <a href="#today" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v15H4zM4 9h16M8 3v4M16 3v4"/></svg>Today</a>
+    <a href="#gym" data-view="gym"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 7v10M17.5 7v10M3.5 9.5v5M20.5 9.5v5M6.5 12h11"/></svg>Gym</a>
     <a href="#history" data-view="history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V5M19 20v-6"/></svg>History</a>
     <a href="#foods" data-view="foods"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c-3-3-8-1-7 5s4 8 7 6c3 2 6 0 7-6s-4-8-7-5zM12 8c0-2 1-4 3-5"/></svg>Foods</a>
     <a href="#settings" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Settings</a>
@@ -310,6 +354,61 @@
       <div class="actions">
         <button type="button" class="danger" id="food-delete" hidden>Delete</button>
         <button class="primary">Save</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Log / edit a workout -->
+<dialog id="workout-dlg" class="sheet">
+  <form id="workout-form" class="form" novalidate>
+    <div class="sheet-head">
+      <span class="sheet-title" id="workout-title">Log workout</span>
+      <button type="button" class="icon" id="workout-close" aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <div id="w-recent-row" hidden>
+        <div class="field-label">Repeat a recent workout</div>
+        <div class="chips" id="w-recent"></div>
+      </div>
+      <div class="seg" id="w-kind" role="group" aria-label="Type">
+        <button type="button" data-kind="strength">Strength</button>
+        <button type="button" data-kind="cardio">Cardio</button>
+        <button type="button" data-kind="other">Sports &amp; other</button>
+      </div>
+      <div class="chips" id="w-activities" role="group" aria-label="Activity"></div>
+      <label id="w-name-row">Activity name <input name="wname" dir="auto" maxlength="60" placeholder="e.g. Climbing"></label>
+      <div>
+        <div class="field-label">Duration</div>
+        <div class="duration">
+          <span class="input-unit"><input name="hours" inputmode="numeric" autocomplete="off" aria-label="Hours" placeholder="0"><span>h</span></span>
+          <span class="input-unit"><input name="mins" inputmode="numeric" autocomplete="off" aria-label="Minutes" placeholder="0"><span>min</span></span>
+        </div>
+        <div class="chips" id="w-durations"></div>
+      </div>
+      <div>
+        <div class="field-label">Effort</div>
+        <div class="seg" id="w-intensity" role="group" aria-label="Effort">
+          <button type="button" data-int="light">Easy</button>
+          <button type="button" data-int="moderate">Moderate</button>
+          <button type="button" data-int="hard">Hard</button>
+        </div>
+        <p class="hint" id="w-intensity-hint"></p>
+      </div>
+      <div id="w-muscles-row">
+        <div class="field-label">Muscles trained</div>
+        <div class="chips" id="w-muscles" role="group" aria-label="Muscles trained"></div>
+      </div>
+      <label id="w-distance-row">Distance (km) <input name="distance" inputmode="decimal" autocomplete="off" placeholder="optional"></label>
+      <div class="preview" id="w-preview"></div>
+      <label>Calories burned <input name="kcal" inputmode="numeric" autocomplete="off">
+        <span class="hint">Leave empty to use the estimate, or type the number from your watch.</span>
+      </label>
+      <label>Notes <input name="notes" dir="auto" maxlength="300" placeholder="e.g. Bench 80 kg 5×5, new PR"></label>
+      <p class="error" id="workout-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="workout-delete" hidden>Delete</button>
+        <button class="primary" id="workout-save">Add</button>
       </div>
     </div>
   </form>

@@ -1,0 +1,344 @@
+{
+    "activities": [
+        {
+            "key": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "met": [
+                3.5,
+                5.0,
+                6.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "calisthenics",
+            "name": "Calisthenics",
+            "kind": "strength",
+            "met": [
+                3.8,
+                5.0,
+                8.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "met": [
+                8.0,
+                9.8,
+                11.5
+            ],
+            "distance": true
+        },
+        {
+            "key": "walking",
+            "name": "Walking",
+            "kind": "cardio",
+            "met": [
+                3.0,
+                3.8,
+                5.0
+            ],
+            "distance": true
+        },
+        {
+            "key": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "met": [
+                5.0,
+                6.5,
+                8.0
+            ],
+            "distance": true
+        },
+        {
+            "key": "cycling",
+            "name": "Cycling",
+            "kind": "cardio",
+            "met": [
+                4.0,
+                6.8,
+                8.8
+            ],
+            "distance": true
+        },
+        {
+            "key": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "met": [
+                4.5,
+                5.5,
+                7.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "rowing",
+            "name": "Rowing machine",
+            "kind": "cardio",
+            "met": [
+                4.8,
+                7.0,
+                8.5
+            ],
+            "distance": true
+        },
+        {
+            "key": "stairs",
+            "name": "Stair climber",
+            "kind": "cardio",
+            "met": [
+                5.0,
+                7.0,
+                9.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "hiit",
+            "name": "HIIT / circuit",
+            "kind": "cardio",
+            "met": [
+                5.0,
+                8.0,
+                9.5
+            ],
+            "distance": false
+        },
+        {
+            "key": "jump_rope",
+            "name": "Jump rope",
+            "kind": "cardio",
+            "met": [
+                8.8,
+                11.0,
+                12.3
+            ],
+            "distance": false
+        },
+        {
+            "key": "swimming",
+            "name": "Swimming",
+            "kind": "cardio",
+            "met": [
+                5.8,
+                7.0,
+                9.8
+            ],
+            "distance": true
+        },
+        {
+            "key": "hiking",
+            "name": "Hiking",
+            "kind": "cardio",
+            "met": [
+                5.3,
+                6.0,
+                7.8
+            ],
+            "distance": true
+        },
+        {
+            "key": "football",
+            "name": "Football",
+            "kind": "other",
+            "met": [
+                7.0,
+                8.0,
+                10.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "basketball",
+            "name": "Basketball",
+            "kind": "other",
+            "met": [
+                6.0,
+                6.5,
+                8.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "martial_arts",
+            "name": "Boxing / martial arts",
+            "kind": "other",
+            "met": [
+                5.5,
+                7.8,
+                10.3
+            ],
+            "distance": false
+        },
+        {
+            "key": "yoga",
+            "name": "Yoga / stretching",
+            "kind": "other",
+            "met": [
+                2.3,
+                2.8,
+                4.0
+            ],
+            "distance": false
+        },
+        {
+            "key": "other",
+            "name": "Other",
+            "kind": "other",
+            "met": [
+                3.5,
+                5.0,
+                7.0
+            ],
+            "distance": false
+        }
+    ],
+    "intensities": [
+        {
+            "key": "light",
+            "name": "Easy"
+        },
+        {
+            "key": "moderate",
+            "name": "Moderate"
+        },
+        {
+            "key": "hard",
+            "name": "Hard"
+        }
+    ],
+    "muscles": [
+        {
+            "key": "chest",
+            "name": "Chest"
+        },
+        {
+            "key": "back",
+            "name": "Back"
+        },
+        {
+            "key": "shoulders",
+            "name": "Shoulders"
+        },
+        {
+            "key": "biceps",
+            "name": "Biceps"
+        },
+        {
+            "key": "triceps",
+            "name": "Triceps"
+        },
+        {
+            "key": "legs",
+            "name": "Legs"
+        },
+        {
+            "key": "abs",
+            "name": "Abs"
+        },
+        {
+            "key": "full_body",
+            "name": "Full body"
+        }
+    ],
+    "weight": 82.0,
+    "default_weight": 70,
+    "recent": [
+        {
+            "id": 47,
+            "date": "2026-10-23",
+            "activity": "running",
+            "name": "Running",
+            "kind": "cardio",
+            "minutes": 40,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": 7.0,
+            "kcal": 481,
+            "kcal_manual": false,
+            "notes": "Tempo"
+        },
+        {
+            "id": 46,
+            "date": "2026-10-23",
+            "activity": "elliptical",
+            "name": "Elliptical",
+            "kind": "cardio",
+            "minutes": 20,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 123,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 45,
+            "date": "2026-10-23",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "hard",
+            "muscles": [
+                "shoulders",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 410,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 44,
+            "date": "2026-10-22",
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "minutes": 20,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 150,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 43,
+            "date": "2026-10-22",
+            "activity": "bodybuilding",
+            "name": "Bodybuilding",
+            "kind": "strength",
+            "minutes": 60,
+            "intensity": "moderate",
+            "muscles": [
+                "legs",
+                "abs"
+            ],
+            "distance_km": null,
+            "kcal": 328,
+            "kcal_manual": false,
+            "notes": ""
+        },
+        {
+            "id": 42,
+            "date": "2026-10-20",
+            "activity": "incline_walk",
+            "name": "Incline walk",
+            "kind": "cardio",
+            "minutes": 30,
+            "intensity": "moderate",
+            "muscles": [],
+            "distance_km": null,
+            "kcal": 226,
+            "kcal_manual": false,
+            "notes": ""
+        }
+    ]
+}

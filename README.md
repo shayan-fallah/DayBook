@@ -14,10 +14,17 @@ It is one Python file with no dependencies, plus a mobile-friendly web page. You
 - **Quick calories** for meals out, and **custom foods** (enter the label per serving).
 - **Personal goal**: calories from sex, age, height, weight, activity and a weekly weight goal (Mifflin-St Jeor),
   with an adjustable macro split. Or just type your own number.
-- **Water** (glasses), **exercise** calories (added to the day's budget) and **weight** logging.
+- **Water** (glasses) and **weight** logging.
+- **Gym tracker**: log bodybuilding, cardio (running, incline walk, cycling, elliptical, rowing, swimming…)
+  or any sport with its duration and effort. Pick the muscles you trained, add distance and notes
+  ("Bench 80 kg 5×5"), or repeat a recent workout in one tap. Burned calories are estimated from your weight
+  and raise the day's calorie budget (all, half or none, your choice).
+- **Gym tab**: training days this week against your weekly goal, goal streak in weeks, hours per day or week
+  split into strength / cardio / other, when you last trained each muscle group, time per activity and a full
+  workout log.
 - **History**: calories per day against your goal, weight trend with weeks-to-goal estimate, average macros,
   calories by meal, top calorie sources, logging streak. Ranges: 7, 30, 90 days or 1 year.
-- **CSV export** of your log and weights (opens correctly in Excel with Persian text).
+- **CSV export** of your log, weights and workouts (opens correctly in Excel with Persian text).
 - Accounts with login, dark mode, works on a phone, and you can add it to your home screen like an app.
 
 ## Run it locally
@@ -76,7 +83,8 @@ installing apps from that source (Files, Chrome, Telegram…). Requires Android 
 
 **First start:** enter your server address (`calories.example.com` or `your-vps-ip:8080`), your username and
 password. The app remembers the login. Everything from the web version is there: food search with units,
-meals, quick re-add, favorites, quick calories, water, weight, exercise, history charts, custom foods and goals.
+meals, quick re-add, favorites, quick calories, water, weight, workouts and the Gym tab, history charts,
+custom foods and goals.
 
 **Rebuild after changing the code** (needs only Docker, no Android Studio):
 
@@ -90,6 +98,17 @@ You can also open `android/` in Android Studio.
 
 The app logs in with a token (`Authorization: Bearer …`) instead of a browser cookie, so it needs this version
 of `app.py` on the server.
+
+## Updating
+
+Update the server first, then the phone app (a new app needs the new server; the old app keeps working with
+the new server in the meantime).
+
+1. **Server:** copy the new files over the old ones (or `git pull`), then restart:
+   `docker compose up -d --build` or `sudo systemctl restart calorie-tracker`. Your data is kept; the database
+   upgrades itself on start.
+2. **Phone:** install the new `android/calorie-tracker.apk` over the old one. Don't uninstall first, so you
+   stay logged in. It only installs as an update when built with the same `android/signing/` key.
 
 ## Settings (environment variables)
 
@@ -124,6 +143,10 @@ With Docker, prefix them: `docker compose exec calories python3 app.py users`.
 - Nutrition values in the dataset are per 100 g. A unit's `multiplier` is how many 100 g portions it weighs,
   so 1 لیوان with multiplier 1.95 is 195 g.
 - Each log entry stores its own numbers, so editing or deleting a custom food never changes your history.
+- Workout calories use MET values from the Compendium of Physical Activities: (MET − 1) × body weight × hours.
+  The −1 leaves out the calories you'd burn resting anyway, since those are already in your daily goal.
+  To add a sport or change a value, edit `ACTIVITIES` in `app.py`; the web page and the app pick it up.
+- Older versions had an "Exercise kcal" box. Those numbers become "Exercise" workouts when the new server starts.
 - If you replace `foods.csv` / `food_units.csv` with a newer version, the app re-imports them on the next start.
 - Tests: `python3 -m unittest discover -s tests -v`
 

@@ -48,6 +48,38 @@ ACTIVITY = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "active": 1.725,
 SOURCE_RANK = {"کرفس": 1, "مانکن": 1}  # generic foods first, branded products (زیره) after
 GRAM_UNIT = "گرم"
 
+# Workouts. MET values (energy use as a multiple of resting) for easy / moderate / hard effort,
+# from the Compendium of Physical Activities. Calories are net: (MET - 1) x kg x hours, because
+# resting calories are already part of the daily goal.
+ACTIVITIES = [
+    # key, name, kind, METs, tracks distance
+    ("bodybuilding", "Bodybuilding", "strength", (3.5, 5.0, 6.0), False),
+    ("calisthenics", "Calisthenics", "strength", (3.8, 5.0, 8.0), False),
+    ("running", "Running", "cardio", (8.0, 9.8, 11.5), True),
+    ("walking", "Walking", "cardio", (3.0, 3.8, 5.0), True),
+    ("incline_walk", "Incline walk", "cardio", (5.0, 6.5, 8.0), True),
+    ("cycling", "Cycling", "cardio", (4.0, 6.8, 8.8), True),
+    ("elliptical", "Elliptical", "cardio", (4.5, 5.5, 7.0), False),
+    ("rowing", "Rowing machine", "cardio", (4.8, 7.0, 8.5), True),
+    ("stairs", "Stair climber", "cardio", (5.0, 7.0, 9.0), False),
+    ("hiit", "HIIT / circuit", "cardio", (5.0, 8.0, 9.5), False),
+    ("jump_rope", "Jump rope", "cardio", (8.8, 11.0, 12.3), False),
+    ("swimming", "Swimming", "cardio", (5.8, 7.0, 9.8), True),
+    ("hiking", "Hiking", "cardio", (5.3, 6.0, 7.8), True),
+    ("football", "Football", "other", (7.0, 8.0, 10.0), False),
+    ("basketball", "Basketball", "other", (6.0, 6.5, 8.0), False),
+    ("martial_arts", "Boxing / martial arts", "other", (5.5, 7.8, 10.3), False),
+    ("yoga", "Yoga / stretching", "other", (2.3, 2.8, 4.0), False),
+    ("other", "Other", "other", (3.5, 5.0, 7.0), False),
+]
+ACTIVITY_BY_KEY = {a[0]: a for a in ACTIVITIES}
+INTENSITIES = (("light", "Easy"), ("moderate", "Moderate"), ("hard", "Hard"))
+INTENSITY_INDEX = {k: i for i, (k, _) in enumerate(INTENSITIES)}
+MUSCLES = (("chest", "Chest"), ("back", "Back"), ("shoulders", "Shoulders"), ("biceps", "Biceps"),
+           ("triceps", "Triceps"), ("legs", "Legs"), ("abs", "Abs"), ("full_body", "Full body"))
+MUSCLE_KEYS = [k for k, _ in MUSCLES]
+DEFAULT_WEIGHT = 70
+
 
 def db_path():
     return os.path.join(DATA_DIR, "tracker.db")
@@ -88,7 +120,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     sex TEXT, age INTEGER, height_cm REAL, activity TEXT DEFAULT 'light',
     rate_kg_week REAL DEFAULT 0, target_weight REAL, calorie_goal INTEGER,
     protein_pct INTEGER DEFAULT 25, carbs_pct INTEGER DEFAULT 45, fat_pct INTEGER DEFAULT 30,
-    water_goal INTEGER DEFAULT 8);
+    water_goal INTEGER DEFAULT 8, exercise_pct INTEGER DEFAULT 100, workout_goal INTEGER DEFAULT 4);
 CREATE TABLE IF NOT EXISTS foods (
     id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL, norm TEXT NOT NULL, compact TEXT NOT NULL, source TEXT, rank INTEGER NOT NULL,
@@ -117,6 +149,13 @@ CREATE TABLE IF NOT EXISTS days (
 CREATE TABLE IF NOT EXISTS weights (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, date TEXT NOT NULL,
     kg REAL NOT NULL, PRIMARY KEY (user_id, date));
+CREATE TABLE IF NOT EXISTS workouts (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    date TEXT NOT NULL, activity TEXT NOT NULL, name TEXT, minutes INTEGER,
+    intensity TEXT NOT NULL DEFAULT 'moderate', muscles TEXT NOT NULL DEFAULT '', distance_km REAL,
+    kcal INTEGER NOT NULL DEFAULT 0, kcal_manual INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS workouts_user_date ON workouts(user_id, date);
 """
 
 
@@ -133,8 +172,23 @@ def init_db(verbose=True):
     db = connect()
     db.execute("PRAGMA journal_mode = WAL")
     db.executescript(SCHEMA)
+    migrate(db)
     import_dataset(db, verbose)
     db.close()
+
+
+def migrate(db):
+    """Bring databases from older versions up to date."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(profiles)")}
+    for name, ddl in (("exercise_pct", "INTEGER DEFAULT 100"), ("workout_goal", "INTEGER DEFAULT 4")):
+        if name not in cols:
+            db.execute(f"ALTER TABLE profiles ADD COLUMN {name} {ddl}")
+    # Calories typed into the old "Exercise" box become workouts, so there is one place for them.
+    for r in db.execute("SELECT user_id, date, exercise_kcal FROM days WHERE exercise_kcal > 0").fetchall():
+        db.execute("INSERT INTO workouts (user_id, date, activity, name, kcal, kcal_manual, created_at) "
+                   "VALUES (?,?,'other','Exercise',?,1,?)", (r[0], r[1], r[2], now_iso()))
+    db.execute("UPDATE days SET exercise_kcal=0 WHERE exercise_kcal > 0")
+    db.commit()
 
 
 def _num(value):
@@ -645,13 +699,20 @@ def day_payload(db, uid, date):
             totals[k] += e[k]
     day = db.execute("SELECT water, exercise_kcal FROM days WHERE user_id=? AND date=?", (uid, d)).fetchone()
     w = db.execute("SELECT kg FROM weights WHERE user_id=? AND date=?", (uid, d)).fetchone()
+    workouts = [workout_json(r) for r in db.execute(
+        "SELECT * FROM workouts WHERE user_id=? AND date=? ORDER BY id", (uid, d))]
+    burned = sum(x["kcal"] for x in workouts) + (day["exercise_kcal"] if day else 0)
+    pct = exercise_pct(profile_row(db, uid))
     return {
         "date": d,
         "entries": entries,
         "totals": {k: rnd(v, 0 if k in ("kcal", "sodium") else 1) for k, v in totals.items()},
         "targets": targets_for(db, uid),
         "water": day["water"] if day else 0,
-        "exercise": day["exercise_kcal"] if day else 0,
+        "exercise": counted_exercise(burned, pct),  # what workouts add to today's goal
+        "burned": burned,
+        "exercise_pct": pct,
+        "workouts": workouts,
         "weight": w["kg"] if w else None,
         "last_weight": latest_weight(db, uid, d),
     }
@@ -806,7 +867,13 @@ def api_profile_save(c):
         raise ApiError(400, f"Protein + carbs + fat must add up to 100% (now {sum(pcts)}%)")
     age = number(b.get("age"), "Age", 10, 110, allow_none=True)
     goal = number(b.get("calorie_goal"), "Calorie goal", 800, 10000, allow_none=True)
-    profile_row(c.db, c.uid)  # make sure the row exists
+    old = profile_row(c.db, c.uid)  # also makes sure the row exists
+    # Older app versions don't send these two, so keep what is saved.
+    pct = int(number(b.get("exercise_pct", exercise_pct(old)), "Workout calories", 0, 100))
+    if pct not in (0, 50, 100):
+        raise ApiError(400, "Workout calories must be 0, 50 or 100%")
+    wgoal = int(number(b.get("workout_goal", old["workout_goal"] or 4), "Training days per week", 1, 7))
+    c.db.execute("UPDATE profiles SET exercise_pct=?, workout_goal=? WHERE user_id=?", (pct, wgoal, c.uid))
     c.db.execute(
         "UPDATE profiles SET sex=?, age=?, height_cm=?, activity=?, rate_kg_week=?, target_weight=?, "
         "calorie_goal=?, protein_pct=?, carbs_pct=?, fat_pct=?, water_goal=? WHERE user_id=?",
@@ -823,6 +890,221 @@ def api_profile_save(c):
     return profile_payload(c.db, c.uid)
 
 
+# --- workouts
+
+def exercise_pct(p):
+    return 100 if p["exercise_pct"] is None else p["exercise_pct"]
+
+
+def counted_exercise(burned, pct):
+    return int(round((burned or 0) * pct / 100))
+
+
+def workout_kcal(activity, intensity, minutes, kg):
+    met = ACTIVITY_BY_KEY.get(activity, ACTIVITY_BY_KEY["other"])[3][INTENSITY_INDEX.get(intensity, 1)]
+    return int(round((met - 1) * (kg or DEFAULT_WEIGHT) * (minutes or 0) / 60))
+
+
+def workout_json(r):
+    a = ACTIVITY_BY_KEY.get(r["activity"])
+    return {
+        "id": r["id"], "date": r["date"], "activity": r["activity"],
+        "name": r["name"] if (r["activity"] == "other" or not a) and r["name"] else (a[1] if a else "Workout"),
+        "kind": a[2] if a else "other",
+        "minutes": r["minutes"], "intensity": r["intensity"],
+        "muscles": [m for m in r["muscles"].split(",") if m],
+        "distance_km": r["distance_km"], "kcal": r["kcal"], "kcal_manual": bool(r["kcal_manual"]),
+        "notes": r["notes"],
+    }
+
+
+def _workout_values(db, uid, b, old=None):
+    """Validate a workout. `old` is the saved row when editing; fields missing from `b` keep its values."""
+    def get(key, default=None):
+        if key in b:
+            return b[key]
+        if old is not None:
+            if key == "muscles":
+                return [m for m in old["muscles"].split(",") if m]
+            return old[key]
+        return default
+
+    date = parse_date(get("date")).isoformat()
+    activity = get("activity")
+    a = ACTIVITY_BY_KEY.get(activity)
+    if not a:
+        raise ApiError(400, "Pick an activity")
+    name = None
+    if activity == "other":
+        name = text(get("name"), "Activity name", 60)
+    minutes = get("minutes")
+    if minutes is None and old is not None and "minutes" not in b:
+        pass  # very old calorie-only entries have no duration
+    else:
+        minutes = int(round(number(minutes, "Duration", 1, 1440)))
+    intensity = get("intensity", "moderate")
+    if intensity not in INTENSITY_INDEX:
+        raise ApiError(400, "Invalid intensity")
+    muscles = get("muscles") or []
+    if not isinstance(muscles, list) or any(m not in MUSCLE_KEYS for m in muscles):
+        raise ApiError(400, "Invalid muscle group")
+    muscles = [m for m in MUSCLE_KEYS if m in muscles] if a[2] == "strength" else []
+    distance = number(get("distance_km"), "Distance", 0, 1000, allow_none=True) if a[4] else None
+    notes = text(get("notes"), "Notes", 300, required=False)
+    # Calories: typed by the user, or estimated from the activity, effort, time and body weight.
+    if "kcal" in b:
+        manual = b["kcal"] not in (None, "")
+    else:
+        manual = bool(old["kcal_manual"]) if old is not None else False
+    if manual:
+        kcal = int(round(number(b["kcal"] if "kcal" in b else old["kcal"], "Calories", 0, 10000)))
+    else:
+        if minutes is None:
+            raise ApiError(400, "Duration is required")
+        kcal = workout_kcal(activity, intensity, minutes, latest_weight(db, uid, date))
+    return {"date": date, "activity": activity, "name": name, "minutes": minutes, "intensity": intensity,
+            "muscles": ",".join(muscles), "distance_km": round(distance, 2) if distance else None,
+            "kcal": kcal, "kcal_manual": int(manual), "notes": notes}
+
+
+WORKOUT_COLS = ("date", "activity", "name", "minutes", "intensity", "muscles", "distance_km", "kcal",
+                "kcal_manual", "notes")
+
+
+@route("GET", "/api/workouts/meta")
+def api_workout_meta(c):
+    """Everything the workout form needs: the activity list, muscles and recent workouts to repeat."""
+    recent = []
+    for r in c.db.execute(
+            "SELECT * FROM workouts WHERE id IN (SELECT MAX(id) FROM workouts WHERE user_id=? AND minutes IS NOT NULL "
+            "GROUP BY activity, IFNULL(name, ''), minutes, intensity, muscles) ORDER BY date DESC, id DESC LIMIT 6",
+            (c.uid,)):
+        recent.append(workout_json(r))
+    return {
+        "activities": [{"key": k, "name": n, "kind": kind, "met": list(m), "distance": d}
+                       for k, n, kind, m, d in ACTIVITIES],
+        "intensities": [{"key": k, "name": n} for k, n in INTENSITIES],
+        "muscles": [{"key": k, "name": n} for k, n in MUSCLES],
+        "weight": latest_weight(c.db, c.uid),
+        "default_weight": DEFAULT_WEIGHT,
+        "recent": recent,
+    }
+
+
+@route("POST", "/api/workouts")
+def api_workout_add(c):
+    v = _workout_values(c.db, c.uid, c.body)
+    cur = c.db.execute(f"INSERT INTO workouts ({', '.join(WORKOUT_COLS)}, user_id, created_at) "
+                       f"VALUES ({', '.join('?' * (len(WORKOUT_COLS) + 2))})",
+                       (*[v[k] for k in WORKOUT_COLS], c.uid, now_iso()))
+    return {"id": cur.lastrowid, "kcal": v["kcal"]}
+
+
+@route("PATCH", r"/api/workouts/(\d+)")
+def api_workout_edit(c, workout_id):
+    old = c.db.execute("SELECT * FROM workouts WHERE id=? AND user_id=?", (int(workout_id), c.uid)).fetchone()
+    if not old:
+        raise ApiError(404, "Workout not found")
+    v = _workout_values(c.db, c.uid, c.body, old)
+    c.db.execute(f"UPDATE workouts SET {', '.join(k + '=?' for k in WORKOUT_COLS)} WHERE id=?",
+                 (*[v[k] for k in WORKOUT_COLS], old["id"]))
+    return {"id": old["id"], "kcal": v["kcal"]}
+
+
+@route("DELETE", r"/api/workouts/(\d+)")
+def api_workout_delete(c, workout_id):
+    c.db.execute("DELETE FROM workouts WHERE id=? AND user_id=?", (int(workout_id), c.uid))
+    return {"ok": True}
+
+
+@route("GET", "/api/workouts/stats")
+def api_workout_stats(c):
+    end = parse_date(c.q("end"), "end")
+    days = int(number(c.q("days", "30"), "days", 1, 366))
+    start = end - dt.timedelta(days=days - 1)
+    s, e = start.isoformat(), end.isoformat()
+    p = profile_row(c.db, c.uid)
+    goal = p["workout_goal"] or 4
+    rows = [workout_json(r) for r in c.db.execute(
+        "SELECT * FROM workouts WHERE user_id=? AND date BETWEEN ? AND ? ORDER BY date DESC, id DESC", (c.uid, s, e))]
+
+    # Minutes per day (short ranges) or per 7-day block ending on `end` (long ranges), split by kind.
+    size = 1 if days <= 31 else 7
+    buckets = []
+    b_end = end
+    while b_end >= start:
+        b_start = max(start, b_end - dt.timedelta(days=size - 1))
+        buckets.append({"start": b_start.isoformat(), "end": b_end.isoformat(),
+                        "strength": 0, "cardio": 0, "other": 0, "sessions": 0, "kcal": 0})
+        b_end = b_start - dt.timedelta(days=1)
+    buckets.reverse()
+    by_activity = {}
+    totals = {"sessions": len(rows), "minutes": 0, "kcal": 0, "strength": 0, "cardio": 0, "other": 0,
+              "days": len({x["date"] for x in rows})}
+    for x in rows:
+        m = x["minutes"] or 0
+        totals["minutes"] += m
+        totals["kcal"] += x["kcal"]
+        totals[x["kind"]] += m
+        idx = (dt.date.fromisoformat(x["date"]) - start).days
+        if size == 7:  # blocks are aligned to `end`, so the first one may be shorter
+            idx = len(buckets) - 1 - (end - dt.date.fromisoformat(x["date"])).days // 7
+        bk = buckets[idx]
+        bk[x["kind"]] += m
+        bk["sessions"] += 1
+        bk["kcal"] += x["kcal"]
+        a = by_activity.setdefault((x["activity"], x["name"]), {
+            "activity": x["activity"], "name": x["name"], "kind": x["kind"], "sessions": 0, "minutes": 0, "kcal": 0})
+        a["sessions"] += 1
+        a["minutes"] += m
+        a["kcal"] += x["kcal"]
+
+    # Training days in each 7-day block back from `end`, for this week's progress and the goal streak.
+    since = (end - dt.timedelta(days=7 * 104)).isoformat()
+    trained = {dt.date.fromisoformat(r[0]) for r in c.db.execute(
+        "SELECT DISTINCT date FROM workouts WHERE user_id=? AND date BETWEEN ? AND ?", (c.uid, since, e))}
+
+    def block_days(k):
+        hi = end - dt.timedelta(days=7 * k)
+        return sum(1 for d in trained if hi - dt.timedelta(days=6) <= d <= hi)
+
+    week_rows = [x for x in rows if x["date"] >= (end - dt.timedelta(days=6)).isoformat()]
+    if days < 7:
+        week_rows = [workout_json(r) for r in c.db.execute(
+            "SELECT * FROM workouts WHERE user_id=? AND date BETWEEN ? AND ?",
+            (c.uid, (end - dt.timedelta(days=6)).isoformat(), e))]
+    week = {"days": block_days(0), "sessions": len(week_rows), "goal": goal,
+            "minutes": sum(x["minutes"] or 0 for x in week_rows), "kcal": sum(x["kcal"] for x in week_rows)}
+    streak = 0
+    k = 0 if week["days"] >= goal else 1  # the current week may still be in progress
+    while k < 104 and block_days(k) >= goal:
+        streak += 1
+        k += 1
+
+    # When each muscle group was last trained (a full-body session counts for all of them).
+    last = {}
+    counts = {m: 0 for m in MUSCLE_KEYS}
+    for r in c.db.execute("SELECT date, muscles FROM workouts WHERE user_id=? AND muscles != '' AND date <= ? "
+                          "ORDER BY date", (c.uid, e)):
+        ms = r["muscles"].split(",")
+        hit = MUSCLE_KEYS if "full_body" in ms else ms
+        for m in hit:
+            if m in counts:
+                last[m] = r["date"]
+                if r["date"] >= s:
+                    counts[m] += 1
+    muscles = [{"key": k2, "name": n, "last": last.get(k2),
+                "days_ago": (end - dt.date.fromisoformat(last[k2])).days if k2 in last else None,
+                "sessions": counts[k2]} for k2, n in MUSCLES if k2 != "full_body"]
+
+    return {
+        "start": s, "end": e, "bucket_days": size, "buckets": buckets, "totals": totals,
+        "week": week, "goal_streak": streak,
+        "by_activity": sorted(by_activity.values(), key=lambda a: -a["minutes"]),
+        "muscles": muscles, "workouts": rows[:200],
+    }
+
+
 # --- history & stats
 
 @route("GET", "/api/stats")
@@ -835,8 +1117,14 @@ def api_stats(c):
     by_day = {r["date"]: r for r in c.db.execute(
         "SELECT date, SUM(kcal) kcal, SUM(protein) protein, SUM(carbs) carbs, SUM(fat) fat, COUNT(*) n "
         "FROM entries WHERE user_id=? AND date BETWEEN ? AND ? GROUP BY date", (c.uid, s, e))}
-    exercise = {r["date"]: r["exercise_kcal"] for r in c.db.execute(
-        "SELECT date, exercise_kcal FROM days WHERE user_id=? AND date BETWEEN ? AND ?", (c.uid, s, e))}
+    pct = exercise_pct(profile_row(c.db, c.uid))
+    burned = {}
+    for r in c.db.execute(
+            "SELECT date, SUM(kcal) k FROM (SELECT date, kcal FROM workouts WHERE user_id=:u AND date BETWEEN :s AND :e "
+            "UNION ALL SELECT date, exercise_kcal FROM days WHERE user_id=:u AND date BETWEEN :s AND :e) GROUP BY date",
+            {"u": c.uid, "s": s, "e": e}):
+        burned[r["date"]] = r["k"] or 0
+    exercise = {d: counted_exercise(k, pct) for d, k in burned.items()}
     series, logged, on_target = [], [], 0
     for i in range(days):
         d = (start + dt.timedelta(days=i)).isoformat()
@@ -897,7 +1185,14 @@ def api_export(c):
     if kind == "weights":
         w.writerow(["date", "kg"])
         w.writerows(c.db.execute("SELECT date, kg FROM weights WHERE user_id=? ORDER BY date", (c.uid,)))
+    elif kind == "workouts":
+        w.writerow(["date", "activity", "minutes", "intensity", "muscles", "distance_km", "kcal", "notes"])
+        for r in c.db.execute("SELECT * FROM workouts WHERE user_id=? ORDER BY date, id", (c.uid,)):
+            x = workout_json(r)
+            w.writerow([x["date"], x["name"], x["minutes"], x["intensity"], " ".join(x["muscles"]),
+                        x["distance_km"], x["kcal"], x["notes"]])
     else:
+        kind = "entries"
         cols = ["date", "meal", "name", "qty", "unit", "grams", *NUTRIENTS]
         w.writerow(cols)
         for r in c.db.execute(f"SELECT {', '.join(cols)} FROM entries WHERE user_id=? ORDER BY date, id", (c.uid,)):

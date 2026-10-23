@@ -319,6 +319,119 @@ class AppTest(unittest.TestCase):
         self.assertEqual(Client(self.base).call("POST", "/api/login",
                                                 {"username": "pwuser", "password": "newsecret"})[0], 200)
 
+    def new_user(self, name):
+        db = sqlite_connect(self.tmp.name)
+        app.create_user(db, name, "secret123")
+        db.commit()
+        db.close()
+        c = Client(self.base)
+        c.call("POST", "/api/login", {"username": name, "password": "secret123"})
+        return c
+
+    def test_workouts(self):
+        c = self.new_user("lifter")
+        d = "2024-05-10"
+        c.call("POST", "/api/weights", {"date": "2024-05-01", "kg": 80})
+        st, meta = c.call("GET", "/api/workouts/meta")
+        self.assertEqual(st, 200)
+        self.assertEqual(meta["activities"][0]["key"], "bodybuilding")
+        self.assertEqual(meta["weight"], 80)
+        # 90 min of hard bodybuilding at 80 kg: (6.0 - 1) * 80 * 1.5 = 600 kcal
+        st, w = c.call("POST", "/api/workouts", {
+            "date": d, "activity": "bodybuilding", "minutes": 90, "intensity": "hard",
+            "muscles": ["triceps", "chest", "chest"], "distance_km": 5, "notes": "Bench 80 kg 5x5"})
+        self.assertEqual((st, w["kcal"]), (200, 600))
+        st, run = c.call("POST", "/api/workouts", {"date": d, "activity": "running", "minutes": 30,
+                                                   "intensity": "moderate", "distance_km": 5, "kcal": 350})
+        self.assertEqual(run["kcal"], 350)  # typed calories win over the estimate
+        day = c.call("GET", f"/api/day?date={d}")[1]
+        self.assertEqual([x["name"] for x in day["workouts"]], ["Bodybuilding", "Running"])
+        lift = day["workouts"][0]
+        self.assertEqual(lift["muscles"], ["chest", "triceps"])  # deduped, catalog order
+        self.assertIsNone(lift["distance_km"])  # no distance for lifting
+        self.assertEqual((day["burned"], day["exercise"], day["exercise_pct"]), (950, 950, 100))
+
+        # Editing the duration re-estimates; a typed calorie number stays.
+        c.call("PATCH", f"/api/workouts/{w['id']}", {"minutes": 60})
+        c.call("PATCH", f"/api/workouts/{run['id']}", {"minutes": 45})
+        day = c.call("GET", f"/api/day?date={d}")[1]
+        self.assertEqual([x["kcal"] for x in day["workouts"]], [400, 350])
+        c.call("PATCH", f"/api/workouts/{run['id']}", {"kcal": None})  # back to the estimate: 8.8*80*0.75
+        self.assertEqual(c.call("GET", f"/api/day?date={d}")[1]["workouts"][1]["kcal"], 528)
+
+        # Only half of workout calories go into the daily goal when asked.
+        c.call("PUT", "/api/profile", {"exercise_pct": 50, "workout_goal": 3})
+        day = c.call("GET", f"/api/day?date={d}")[1]
+        self.assertEqual((day["burned"], day["exercise"]), (928, 464))
+        self.assertEqual(c.call("GET", f"/api/stats?end={d}&days=7")[1]["days"][-1]["exercise"], 464)
+        c.call("PUT", "/api/profile", {"sex": "male"})  # older apps don't send the new fields
+        self.assertEqual(c.call("GET", "/api/profile")[1]["exercise_pct"], 50)
+        self.assertEqual(c.call("PUT", "/api/profile", {"exercise_pct": 30})[0], 400)
+
+        # Validation
+        bad = [{"activity": "flying", "minutes": 30}, {"activity": "running", "minutes": 0},
+               {"activity": "other", "minutes": 30}, {"activity": "running", "minutes": 30, "intensity": "max"},
+               {"activity": "bodybuilding", "minutes": 30, "muscles": ["wings"]}]
+        for body in bad:
+            self.assertEqual(c.call("POST", "/api/workouts", {"date": d, **body})[0], 400, body)
+        st, other = c.call("POST", "/api/workouts", {"date": "2024-05-08", "activity": "other", "name": "Climbing",
+                                                     "minutes": 60, "muscles": ["back"]})
+        self.assertEqual(st, 200)
+        self.assertEqual(self.c.call("DELETE", f"/api/workouts/{other['id']}")[0], 200)  # someone else's: no-op
+        self.assertEqual(self.c.call("PATCH", f"/api/workouts/{other['id']}", {"minutes": 5})[0], 404)
+
+        # Stats
+        c.call("POST", "/api/workouts", {"date": "2024-05-04", "activity": "bodybuilding", "minutes": 60,
+                                         "muscles": ["legs"]})
+        c.call("POST", "/api/workouts", {"date": "2024-05-02", "activity": "calisthenics", "minutes": 30,
+                                         "muscles": ["full_body"]})
+        st, s = c.call("GET", f"/api/workouts/stats?end={d}&days=7")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(s["buckets"]), 7)
+        self.assertEqual(s["buckets"][-1], {"start": d, "end": d, "strength": 60, "cardio": 45, "other": 0,
+                                            "sessions": 2, "kcal": 928})
+        self.assertEqual(s["totals"]["sessions"], 4)
+        self.assertEqual(s["totals"]["days"], 3)
+        self.assertEqual(s["week"], {"days": 3, "sessions": 4, "goal": 3, "minutes": 225,
+                                     "kcal": s["totals"]["kcal"]})
+        self.assertEqual(s["goal_streak"], 1)
+        m = {x["key"]: x for x in s["muscles"]}
+        self.assertEqual(m["chest"]["days_ago"], 0)
+        self.assertEqual(m["legs"]["last"], "2024-05-04")
+        self.assertEqual(m["abs"]["last"], "2024-05-02")  # from the full-body session
+        self.assertEqual(m["abs"]["sessions"], 0)  # outside the 7-day range
+        self.assertEqual(s["by_activity"][0]["name"], "Bodybuilding")
+        self.assertEqual(s["workouts"][0]["date"], d)
+        long = c.call("GET", f"/api/workouts/stats?end={d}&days=90")[1]
+        self.assertEqual(long["bucket_days"], 7)
+        self.assertEqual(sum(b["sessions"] for b in long["buckets"]), 5)
+        self.assertEqual(long["buckets"][-1]["start"], "2024-05-04")
+
+        meta = c.call("GET", "/api/workouts/meta")[1]
+        self.assertEqual([x["activity"] for x in meta["recent"]][:3], ["running", "bodybuilding", "other"])
+        st, csv_data = c.call("GET", "/api/export?type=workouts", raw=True)
+        self.assertIn("Bench 80 kg 5x5", csv_data.decode("utf-8-sig"))
+        c.call("DELETE", f"/api/workouts/{w['id']}")
+        self.assertEqual(len(c.call("GET", f"/api/day?date={d}")[1]["workouts"]), 1)
+
+    def test_migrate_old_exercise_box(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, sex TEXT, age INTEGER, height_cm REAL, "
+                   "activity TEXT, rate_kg_week REAL, target_weight REAL, calorie_goal INTEGER, protein_pct INTEGER, "
+                   "carbs_pct INTEGER, fat_pct INTEGER, water_goal INTEGER)")
+        db.execute("INSERT INTO profiles (user_id) VALUES (1)")
+        db.executescript(app.SCHEMA)
+        db.execute("INSERT INTO days (user_id, date, water, exercise_kcal) VALUES (1, '2024-01-01', 3, 250)")
+        app.migrate(db)
+        app.migrate(db)  # running twice changes nothing
+        p = db.execute("SELECT exercise_pct, workout_goal FROM profiles").fetchone()
+        self.assertEqual(tuple(p), (100, 4))
+        rows = db.execute("SELECT date, activity, name, kcal, kcal_manual, minutes FROM workouts").fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("2024-01-01", "other", "Exercise", 250, 1, None)])
+        self.assertEqual(db.execute("SELECT exercise_kcal, water FROM days").fetchone()[:], (0, 3))
+
 
 def sqlite_connect(data_dir):
     app.DATA_DIR = data_dir

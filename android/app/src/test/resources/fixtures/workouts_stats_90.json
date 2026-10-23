@@ -1,0 +1,289 @@
+{
+ "start": "2026-07-26",
+ "end": "2026-10-23",
+ "bucket_days": 7,
+ "buckets": [
+  {
+   "start": "2026-07-26",
+   "end": "2026-07-31",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-08-01",
+   "end": "2026-08-07",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-08-08",
+   "end": "2026-08-14",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-08-15",
+   "end": "2026-08-21",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-08-22",
+   "end": "2026-08-28",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-08-29",
+   "end": "2026-09-04",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-09-05",
+   "end": "2026-09-11",
+   "strength": 0,
+   "cardio": 0,
+   "other": 0,
+   "sessions": 0,
+   "kcal": 0
+  },
+  {
+   "start": "2026-09-12",
+   "end": "2026-09-18",
+   "strength": 195,
+   "cardio": 85,
+   "other": 0,
+   "sessions": 6,
+   "kcal": 1903
+  },
+  {
+   "start": "2026-09-19",
+   "end": "2026-09-25",
+   "strength": 285,
+   "cardio": 65,
+   "other": 0,
+   "sessions": 6,
+   "kcal": 2347
+  },
+  {
+   "start": "2026-09-26",
+   "end": "2026-10-02",
+   "strength": 300,
+   "cardio": 115,
+   "other": 0,
+   "sessions": 8,
+   "kcal": 2762
+  },
+  {
+   "start": "2026-10-03",
+   "end": "2026-10-09",
+   "strength": 315,
+   "cardio": 85,
+   "other": 0,
+   "sessions": 7,
+   "kcal": 2630
+  },
+  {
+   "start": "2026-10-10",
+   "end": "2026-10-16",
+   "strength": 285,
+   "cardio": 95,
+   "other": 90,
+   "sessions": 8,
+   "kcal": 3885
+  },
+  {
+   "start": "2026-10-17",
+   "end": "2026-10-23",
+   "strength": 345,
+   "cardio": 205,
+   "other": 0,
+   "sessions": 12,
+   "kcal": 3861
+  }
+ ],
+ "totals": {
+  "sessions": 47,
+  "minutes": 2465,
+  "kcal": 17388,
+  "strength": 1725,
+  "cardio": 650,
+  "other": 90,
+  "days": 31
+ },
+ "week": {
+  "days": 6,
+  "sessions": 12,
+  "goal": 4,
+  "minutes": 550,
+  "kcal": 3861
+ },
+ "goal_streak": 6,
+ "by_activity": [
+  {
+   "activity": "bodybuilding",
+   "name": "Bodybuilding",
+   "kind": "strength",
+   "sessions": 24,
+   "minutes": 1725,
+   "kcal": 10453
+  },
+  {
+   "activity": "running",
+   "name": "Running",
+   "kind": "cardio",
+   "sessions": 7,
+   "minutes": 250,
+   "kcal": 3007
+  },
+  {
+   "activity": "elliptical",
+   "name": "Elliptical",
+   "kind": "cardio",
+   "sessions": 6,
+   "minutes": 160,
+   "kcal": 982
+  },
+  {
+   "activity": "incline_walk",
+   "name": "Incline walk",
+   "kind": "cardio",
+   "sessions": 6,
+   "minutes": 160,
+   "kcal": 1204
+  },
+  {
+   "activity": "football",
+   "name": "Football",
+   "kind": "other",
+   "sessions": 1,
+   "minutes": 90,
+   "kcal": 1107
+  },
+  {
+   "activity": "cycling",
+   "name": "Cycling",
+   "kind": "cardio",
+   "sessions": 3,
+   "minutes": 80,
+   "kcal": 635
+  }
+ ],
+ "muscles": [
+  {
+   "key": "chest",
+   "name": "Chest",
+   "last": "2026-10-19",
+   "days_ago": 4,
+   "sessions": 6
+  },
+  {
+   "key": "back",
+   "name": "Back",
+   "last": "2026-10-20",
+   "days_ago": 3,
+   "sessions": 6
+  },
+  {
+   "key": "shoulders",
+   "name": "Shoulders",
+   "last": "2026-10-23",
+   "days_ago": 0,
+   "sessions": 6
+  },
+  {
+   "key": "biceps",
+   "name": "Biceps",
+   "last": "2026-10-20",
+   "days_ago": 3,
+   "sessions": 6
+  },
+  {
+   "key": "triceps",
+   "name": "Triceps",
+   "last": "2026-10-19",
+   "days_ago": 4,
+   "sessions": 6
+  },
+  {
+   "key": "legs",
+   "name": "Legs",
+   "last": "2026-10-22",
+   "days_ago": 1,
+   "sessions": 6
+  },
+  {
+   "key": "abs",
+   "name": "Abs",
+   "last": "2026-10-23",
+   "days_ago": 0,
+   "sessions": 12
+  }
+ ],
+ "workouts": [
+  {
+   "id": 47,
+   "date": "2026-10-23",
+   "activity": "running",
+   "name": "Running",
+   "kind": "cardio",
+   "minutes": 40,
+   "intensity": "moderate",
+   "muscles": [],
+   "distance_km": 7.0,
+   "kcal": 481,
+   "kcal_manual": false,
+   "notes": "Tempo"
+  },
+  {
+   "id": 46,
+   "date": "2026-10-23",
+   "activity": "elliptical",
+   "name": "Elliptical",
+   "kind": "cardio",
+   "minutes": 20,
+   "intensity": "moderate",
+   "muscles": [],
+   "distance_km": null,
+   "kcal": 123,
+   "kcal_manual": false,
+   "notes": ""
+  },
+  {
+   "id": 45,
+   "date": "2026-10-23",
+   "activity": "bodybuilding",
+   "name": "Bodybuilding",
+   "kind": "strength",
+   "minutes": 60,
+   "intensity": "hard",
+   "muscles": [
+    "shoulders",
+    "abs"
+   ],
+   "distance_km": null,
+   "kcal": 410,
+   "kcal_manual": false,
+   "notes": ""
+  }
+ ]
+}
