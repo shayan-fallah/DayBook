@@ -84,6 +84,7 @@ fun SettingsScreen(vm: AppViewModel) {
         } else {
             ProfileForm(vm, profile)
         }
+        WorkSettingsCards(vm)
         AppCard {
             CardTitle("Account")
             Spacer(Modifier.height(4.dp))
@@ -97,7 +98,7 @@ fun SettingsScreen(vm: AppViewModel) {
         }
         AppCard {
             CardTitle("Your data")
-            SubText("Download your food log, weights and workouts as CSV from the web version: Settings → Your data.")
+            SubText("Download your food log, weights, workouts and time log as CSV from the web version: Settings → Your data.")
         }
         Text(
             "Food data from Fig Fit (figfit.ir), licensed CC BY-NC-SA 4.0.",

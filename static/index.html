@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Calorie Tracker</title>
+<title>Daybook</title>
 <meta name="theme-color" content="#2a78d6">
 <link rel="manifest" href="/static/manifest.webmanifest">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
@@ -11,14 +11,16 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/jalali.js" defer></script>
 <script src="/static/app.js" defer></script>
+<script src="/static/work.js" defer></script>
 </head>
 <body>
 
 <!-- Login / sign-up -->
 <div id="auth" class="auth" hidden>
   <form id="auth-form" class="card auth-card">
-    <div class="brand"><img src="/static/icon.svg" alt="" width="40" height="40"><span>Calorie Tracker</span></div>
+    <div class="brand"><img src="/static/icon.svg" alt="" width="40" height="40"><span>Daybook</span></div>
     <h1 id="auth-title">Log in</h1>
     <p id="auth-hint" class="muted"></p>
     <label>Username <input name="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
@@ -155,6 +157,13 @@
     <!-- FOODS -->
     <section id="view-foods" class="view" hidden>
       <div class="card">
+        <h2>Find a food</h2>
+        <p class="sub">Look up any food to check or change its calories, macros and serving sizes.</p>
+        <input id="foods-search" type="search" dir="auto" autocomplete="off" enterkeyhint="search"
+               placeholder="Search foods: نان، برنج، سیب…">
+        <ul class="list" id="foods-results"></ul>
+      </div>
+      <div class="card">
         <div class="card-head">
           <h2>My foods</h2>
           <button class="primary" id="new-food">+ New food</button>
@@ -162,10 +171,131 @@
         <p class="sub">Add foods that aren't in the database, like a home recipe or a product label. They show up in search.</p>
         <ul class="list" id="my-foods"></ul>
       </div>
+      <div class="card" id="edited-card" hidden>
+        <h2>Edited foods</h2>
+        <p class="sub">Foods from the database you changed. Only you see your values; open one to go back to the original.</p>
+        <ul class="list" id="edited-foods"></ul>
+      </div>
       <div class="card">
         <h2>Favorites</h2>
         <p class="sub">Tap ☆ on any food to pin it here and to the top of search.</p>
         <ul class="list" id="fav-foods"></ul>
+      </div>
+    </section>
+
+    <!-- TIME -->
+    <section id="view-time" class="view" hidden>
+      <div class="seg" id="time-seg" role="group" aria-label="Time sections">
+        <button data-sub="timer">Timer</button>
+        <button data-sub="projects">Projects</button>
+        <button data-sub="reports">Reports</button>
+      </div>
+
+      <div id="time-timer" class="view">
+        <div class="card timer-card">
+          <input id="t-desc" dir="auto" maxlength="300" autocomplete="off" placeholder="What are you working on?">
+          <div class="grid2">
+            <select id="t-proj" aria-label="Project"></select>
+            <select id="t-task" aria-label="Task"></select>
+          </div>
+          <div class="timer-row">
+            <div class="clock" id="t-clock">0:00:00</div>
+            <button class="go" id="t-go" type="button">Start</button>
+          </div>
+          <div class="t-stats" id="t-stats"></div>
+        </div>
+        <div class="card meal">
+          <div class="meal-head"><h3>Time log</h3><button class="primary" type="button" id="t-add">+ Add</button></div>
+          <div id="t-log"></div>
+        </div>
+        <div class="day-actions"><button class="link" type="button" id="t-more">Show older</button></div>
+      </div>
+
+      <div id="time-projects" class="view" hidden>
+        <button class="primary wide" type="button" id="p-new">+ New project</button>
+        <div class="card meal" id="p-list"></div>
+        <details class="card archived-box" id="p-archived-box" hidden>
+          <summary>Archived projects</summary>
+          <div id="p-archived"></div>
+        </details>
+      </div>
+
+      <div id="time-reports" class="view" hidden>
+        <div class="seg" id="r-preset" role="group" aria-label="Report period">
+          <button data-p="day">Day</button>
+          <button data-p="week">Week</button>
+          <button data-p="month">Month</button>
+          <button data-p="year">Year</button>
+        </div>
+        <div class="datebar">
+          <button class="icon" id="r-prev" aria-label="Previous period">‹</button>
+          <span class="date-pick" id="r-label"></span>
+          <button class="icon" id="r-next" aria-label="Next period">›</button>
+        </div>
+        <div class="tiles" id="r-tiles"></div>
+        <div class="card" id="r-chart-card">
+          <h2>Hours</h2>
+          <p class="sub" id="r-chart-sub"></p>
+          <div class="chart" id="r-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>By project</h2><a class="btn small-btn" id="r-csv" download>CSV</a></div>
+          <p class="sub">Tap a project to see its tasks. Planned time comes from the planner.</p>
+          <div id="r-projects"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PLAN -->
+    <section id="view-plan" class="view" hidden>
+      <div class="seg" id="plan-seg" role="group" aria-label="Plan sections">
+        <button data-sub="schedule">Schedule</button>
+        <button data-sub="todo">To-do</button>
+      </div>
+
+      <div id="plan-schedule" class="view">
+        <div class="datebar">
+          <button class="icon" id="pl-prev" aria-label="Previous day">‹</button>
+          <label class="date-pick">
+            <span id="pl-label"></span>
+            <input type="date" id="pl-date" aria-label="Pick a date">
+          </label>
+          <button class="icon" id="pl-next" aria-label="Next day">›</button>
+        </div>
+        <div class="week-strip" id="pl-week"></div>
+        <div class="card plan-card">
+          <div class="plan-head">
+            <div class="plan-sum" id="pl-sum"></div>
+            <button class="primary" type="button" id="pl-add">+ Plan</button>
+          </div>
+          <div class="allday" id="pl-allday"></div>
+          <div class="timeline-scroll" id="pl-scroll"><div class="timeline" id="pl-timeline"></div></div>
+          <p class="hint plan-hint" id="pl-hint">Tap an empty spot to plan time there. The thin bars on the right are the time you logged.</p>
+        </div>
+      </div>
+
+      <div id="plan-todo" class="view" hidden>
+        <form class="card todo-add" id="todo-form">
+          <input name="title" dir="auto" maxlength="200" autocomplete="off" placeholder="Add a to-do…" required>
+          <div class="todo-add-row">
+            <input name="due" type="date" aria-label="Due date">
+            <select name="project" aria-label="Project"></select>
+            <button class="primary">Add</button>
+          </div>
+        </form>
+        <div class="todo-filter">
+          <select id="todo-filter" aria-label="Show"></select>
+        </div>
+        <div id="todo-groups"></div>
+      </div>
+    </section>
+
+    <!-- MORE -->
+    <section id="view-more" class="view" hidden>
+      <div class="card meal more-list">
+        <a href="#history" class="more-row"><span>History</span><small>Calories, weight and macros over time</small></a>
+        <a href="#foods" class="more-row"><span>Foods</span><small>Find and edit foods, your own foods, favorites</small></a>
+        <a href="#settings" class="more-row"><span>Settings</span><small>Goals, Google Calendar, password, your data</small></a>
       </div>
     </section>
 
@@ -234,12 +364,51 @@
         <button class="primary wide">Save</button>
       </form>
 
+      <form id="prefs-form" class="card form">
+        <h2>Time and planner</h2>
+        <label>Daily work goal (hours) <input name="work_goal" inputmode="decimal" placeholder="8"></label>
+        <div class="grid2">
+          <label>Week starts on
+            <select name="week_start">
+              <option value="auto">Automatic</option>
+              <option value="sat">Saturday</option>
+              <option value="sun">Sunday</option>
+              <option value="mon">Monday</option>
+            </select>
+          </label>
+          <label>Dates
+            <select name="calendar">
+              <option value="gregorian">Gregorian</option>
+              <option value="jalali">Shamsi (Solar Hijri)</option>
+            </select>
+          </label>
+        </div>
+        <p class="error" id="prefs-error" role="alert"></p>
+        <button class="wide">Save</button>
+      </form>
+
+      <div class="card" id="google-card">
+        <h2>Google Calendar</h2>
+        <div id="google-body" class="form"><p class="muted">Loading…</p></div>
+      </div>
+
+      <div class="card form">
+        <h2>Calendar feed</h2>
+        <p class="sub">A private link to subscribe to in any calendar app (Apple, Outlook, Google…). It has your planned blocks and dated to-dos and updates every few hours. Anyone with the link can see them.</p>
+        <div class="copy-row">
+          <input id="ics-url" readonly aria-label="Calendar feed link" placeholder="Loading…">
+          <button type="button" id="ics-copy">Copy</button>
+        </div>
+        <button type="button" class="link" id="ics-reset">Make a new link (the old one stops working)</button>
+      </div>
+
       <div class="card">
         <h2>Your data</h2>
         <div class="btn-row">
           <a class="btn" href="/api/export?type=entries" download>Download food log (CSV)</a>
           <a class="btn" href="/api/export?type=weights" download>Download weights (CSV)</a>
           <a class="btn" href="/api/export?type=workouts" download>Download workouts (CSV)</a>
+          <a class="btn" id="export-time" href="/api/export?type=time" download>Download time log (CSV)</a>
         </div>
       </div>
 
@@ -259,12 +428,21 @@
     </section>
   </main>
 
+  <div class="timer-bar" id="timer-bar" hidden>
+    <a href="#time" class="timer-bar-main" id="timer-bar-main">
+      <i class="dot" id="timer-bar-dot"></i>
+      <span class="timer-bar-text" id="timer-bar-text" dir="auto"></span>
+      <b class="timer-bar-clock" id="timer-bar-clock">0:00:00</b>
+    </a>
+    <button type="button" class="timer-bar-stop" id="timer-bar-stop" aria-label="Stop timer">■</button>
+  </div>
+
   <nav class="tabbar" aria-label="Main">
-    <a href="#today" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v15H4zM4 9h16M8 3v4M16 3v4"/></svg>Today</a>
+    <a href="#today" data-view="today"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c-3-3-8-1-7 5s4 8 7 6c3 2 6 0 7-6s-4-8-7-5zM12 8c0-2 1-4 3-5"/></svg>Today</a>
     <a href="#gym" data-view="gym"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 7v10M17.5 7v10M3.5 9.5v5M20.5 9.5v5M6.5 12h11"/></svg>Gym</a>
-    <a href="#history" data-view="history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M12 20V5M19 20v-6"/></svg>History</a>
-    <a href="#foods" data-view="foods"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8c-3-3-8-1-7 5s4 8 7 6c3 2 6 0 7-6s-4-8-7-5zM12 8c0-2 1-4 3-5"/></svg>Foods</a>
-    <a href="#settings" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Settings</a>
+    <a href="#time" data-view="time"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2.5h5"/></svg>Time</a>
+    <a href="#plan" data-view="plan"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v15H4zM4 9h16M8 3v4M16 3v4M8 13h3M8 16h6"/></svg>Plan</a>
+    <a href="#more" data-view="more"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg>More</a>
   </nav>
 </div>
 
@@ -307,6 +485,7 @@
     <button class="link back" id="detail-back">‹ Back to search</button>
     <div class="detail-head">
       <h3 id="d-name" dir="auto"></h3>
+      <button class="icon" id="d-edit" aria-label="Edit this food" title="Edit calories, macros and units">✎</button>
       <button class="icon star" id="d-fav" aria-label="Favorite" aria-pressed="false">☆</button>
     </div>
     <p class="sub" id="d-per100"></p>
@@ -327,22 +506,27 @@
   </div>
 </dialog>
 
-<!-- Create / edit a custom food -->
+<!-- Create / edit any food -->
 <dialog id="food-dlg" class="sheet">
-  <form id="food-form" class="form">
+  <form id="food-form" class="form" novalidate>
     <div class="sheet-head">
       <span class="sheet-title" id="food-title">New food</span>
       <button type="button" class="icon" id="food-close" aria-label="Close">✕</button>
     </div>
     <div class="sheet-body">
+      <p class="banner" id="food-note" hidden></p>
       <label>Name <input name="name" dir="auto" required maxlength="100"></label>
-      <div class="grid2">
-        <label>Serving name <input name="serving_name" dir="auto" placeholder="serving" maxlength="40"></label>
-        <label>Serving size (g) <input name="serving_grams" inputmode="decimal" required placeholder="100"></label>
+      <div>
+        <div class="field-label">Serving sizes</div>
+        <div id="food-units" class="unit-rows"></div>
+        <button type="button" class="link" id="food-unit-add">+ Add a serving size</button>
+        <p class="hint">Like “slice = 30 g” or “<bdi>عدد</bdi> = 120 g”. Grams always work too.</p>
       </div>
-      <p class="sub">Nutrition for one serving:</p>
+      <label>Values below are for
+        <select name="basis" id="food-basis"></select>
+      </label>
       <div class="grid2">
-        <label>Calories (kcal) <input name="kcal" inputmode="decimal" required></label>
+        <label>Calories (kcal) <input name="kcal" inputmode="decimal"></label>
         <label>Protein (g) <input name="protein" inputmode="decimal"></label>
         <label>Carbs (g) <input name="carbs" inputmode="decimal"></label>
         <label>Fat (g) <input name="fat" inputmode="decimal"></label>
@@ -350,9 +534,12 @@
         <label>Sugar (g) <input name="sugar" inputmode="decimal"></label>
         <label>Sodium (mg) <input name="sodium" inputmode="decimal"></label>
       </div>
+      <label class="check" id="food-update-row" hidden><input type="checkbox" name="update_entries">
+        <span id="food-update-text">Also update my past log entries of this food</span></label>
       <p class="error" id="food-error" role="alert"></p>
       <div class="actions">
         <button type="button" class="danger" id="food-delete" hidden>Delete</button>
+        <button type="button" id="food-reset" hidden>Reset to original</button>
         <button class="primary">Save</button>
       </div>
     </div>
@@ -409,6 +596,133 @@
       <div class="actions">
         <button type="button" class="danger" id="workout-delete" hidden>Delete</button>
         <button class="primary" id="workout-save">Add</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add / edit a time entry -->
+<dialog id="entry-dlg" class="sheet">
+  <form id="entry-form" class="form" novalidate>
+    <div class="sheet-head">
+      <span class="sheet-title" id="entry-title">Add time</span>
+      <button type="button" class="icon" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <label>What did you do? <input name="desc" dir="auto" maxlength="300" autocomplete="off" placeholder="Description"></label>
+      <div class="grid2">
+        <label>Project <select name="proj"></select></label>
+        <label>Task <select name="task"></select></label>
+      </div>
+      <label>Date <input name="date" type="date" required></label>
+      <div class="grid2">
+        <label>Start <input name="start" type="time" required></label>
+        <label>End <input name="end" type="time" required></label>
+      </div>
+      <p class="hint" id="entry-hint"></p>
+      <p class="error" id="entry-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="entry-delete" hidden>Delete</button>
+        <button class="primary" id="entry-save">Add</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add / edit a project -->
+<dialog id="project-dlg" class="sheet">
+  <form id="project-form" class="form" novalidate>
+    <div class="sheet-head">
+      <span class="sheet-title" id="project-title">New project</span>
+      <button type="button" class="icon" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <label>Name <input name="name" dir="auto" maxlength="80" required autocomplete="off"></label>
+      <div>
+        <div class="field-label">Color</div>
+        <div class="swatches" id="project-colors" role="radiogroup" aria-label="Color"></div>
+      </div>
+      <label class="check" id="project-archived-row"><input type="checkbox" name="archived"> Archived (hidden from pickers)</label>
+      <p class="hint" id="project-stats"></p>
+      <p class="error" id="project-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="project-delete" hidden>Delete</button>
+        <button class="primary" id="project-save">Save</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add / edit a to-do -->
+<dialog id="task-dlg" class="sheet">
+  <form id="task-form" class="form" novalidate>
+    <div class="sheet-head">
+      <span class="sheet-title" id="task-title">To-do</span>
+      <button type="button" class="icon" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <label>Title <input name="title" dir="auto" maxlength="200" required autocomplete="off"></label>
+      <div class="grid2">
+        <label>Project <select name="proj"></select></label>
+        <label>Due <input name="due" type="date"></label>
+      </div>
+      <label>Priority
+        <select name="priority">
+          <option value="0">None</option>
+          <option value="1">Low</option>
+          <option value="2">Medium</option>
+          <option value="3">High</option>
+        </select>
+      </label>
+      <label>Notes <textarea name="notes" dir="auto" rows="3" maxlength="2000"></textarea></label>
+      <label class="check"><input type="checkbox" name="done"> Done</label>
+      <p class="hint" id="task-stats"></p>
+      <p class="error" id="task-error" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="danger" id="task-delete" hidden>Delete</button>
+        <button type="button" id="task-schedule" hidden>Schedule</button>
+        <button class="primary" id="task-save">Save</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<!-- Add / edit a planned block -->
+<dialog id="block-dlg" class="sheet">
+  <form id="block-form" class="form" novalidate>
+    <div class="sheet-head">
+      <span class="sheet-title" id="block-title">Plan time</span>
+      <button type="button" class="icon" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body">
+      <label>Title <input name="title" dir="auto" maxlength="200" autocomplete="off" placeholder="Optional if you pick a project"></label>
+      <div class="grid2">
+        <label>Project <select name="proj"></select></label>
+        <label>Task <select name="task"></select></label>
+      </div>
+      <label>Date <input name="date" type="date" required></label>
+      <div class="grid2">
+        <label>Start <input name="start" type="time" required></label>
+        <label>End <input name="end" type="time" required></label>
+      </div>
+      <div class="grid2" id="block-repeat-row">
+        <label>Repeat
+          <select name="repeat">
+            <option value="">Doesn't repeat</option>
+            <option value="daily">Every day</option>
+            <option value="weekdays">Every work day</option>
+            <option value="weekly">Every week</option>
+          </select>
+        </label>
+        <label id="block-count-row" hidden>Times <input name="count" inputmode="numeric" value="4"></label>
+      </div>
+      <label>Notes <textarea name="notes" dir="auto" rows="2" maxlength="2000"></textarea></label>
+      <p class="hint" id="block-hint"></p>
+      <p class="error" id="block-error" role="alert"></p>
+      <div class="actions wrap">
+        <button type="button" class="danger" id="block-delete" hidden>Delete</button>
+        <button type="button" id="block-start" hidden>▶ Start timer</button>
+        <button class="primary" id="block-save">Save</button>
       </div>
     </div>
   </form>

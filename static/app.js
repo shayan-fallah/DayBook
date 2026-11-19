@@ -132,6 +132,7 @@ const state = {
   quick: null,
   tab: 'recent',
   add: null, // { mode: 'add'|'edit', entry, food }
+  view: null,
 };
 
 // ---------------------------------------------------------------- auth
@@ -155,6 +156,8 @@ async function boot() {
 
 function showAuth() {
   $$('dialog[open]').forEach((d) => d.close());
+  state.view = null;
+  workReset();
   $('#app').hidden = true;
   $('#auth').hidden = false;
   setAuthMode(authInfo && authInfo.first_user ? 'signup' : 'login');
@@ -196,24 +199,33 @@ function showApp() {
   $('#auth').hidden = true;
   $('#app').hidden = false;
   $('#me-name').textContent = state.user;
-  route();
+  workStart().then(route);
 }
 
 // ---------------------------------------------------------------- routing
 
-const VIEWS = ['today', 'gym', 'history', 'foods', 'settings'];
+const VIEWS = ['today', 'gym', 'time', 'plan', 'more', 'history', 'foods', 'settings'];
+const TAB_OF = { history: 'more', foods: 'more', settings: 'more' }; // pages reached from "More"
 
+/** Show the view in the URL hash: #view or #view/section (e.g. #time/reports). */
 function route() {
   if ($('#app').hidden) return;
-  const view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'today';
+  const [name, sub] = location.hash.slice(1).split('/');
+  const view = VIEWS.includes(name) ? name : 'today';
+  const changed = state.view !== view;
+  state.view = view;
   for (const v of VIEWS) $(`#view-${v}`).hidden = v !== view;
-  $$('.tabbar a').forEach((a) => a.classList.toggle('on', a.dataset.view === view));
-  window.scrollTo(0, 0);
+  const tab = TAB_OF[view] || view;
+  $$('.tabbar a').forEach((a) => a.classList.toggle('on', a.dataset.view === tab));
+  if (changed) window.scrollTo(0, 0);
   if (view === 'today') loadDay();
   if (view === 'gym') loadGym();
   if (view === 'history') loadHistory();
   if (view === 'foods') loadFoods();
-  if (view === 'settings') loadProfile();
+  if (view === 'settings') { loadProfile(); loadWorkSettings(); }
+  if (view === 'time') showTime(sub);
+  if (view === 'plan') showPlan(sub);
+  updateTimerBar();
 }
 window.addEventListener('hashchange', route);
 
@@ -226,7 +238,9 @@ document.addEventListener('visibilitychange', () => {
     if (state.date === lastSeenToday) state.date = now;
     lastSeenToday = now;
   }
-  if (!$('#view-today').hidden && !$('dialog[open]')) loadDay();
+  if ($('dialog[open]')) return;
+  if (!$('#view-today').hidden) loadDay();
+  workOnResume();
 });
 
 // ---------------------------------------------------------------- today
@@ -482,9 +496,14 @@ function renderTab() {
   const empty = {
     recent: 'Foods you log will show up here for one-tap adding.',
     favorites: 'Tap ☆ on a food to add it to your favorites.',
-    mine: 'Create your own foods on the Foods tab.',
+    mine: 'Foods you create show up here.',
   }[state.tab];
   renderResults(list, empty);
+  if (state.tab === 'mine') {
+    $('#results').prepend(el('li', { class: 'list-action' }, el('button', {
+      class: 'link', type: 'button', onclick: () => openFoodForm(null, { onSaved: (id) => openDetail(id) }),
+    }, '+ Create a new food')));
+  }
 }
 
 function foodSub(f) {
@@ -502,7 +521,7 @@ function renderResults(list, emptyText) {
   ul.replaceChildren(...list.map((f) => el('li', {},
     el('button', { class: 'row-main', type: 'button', onclick: () => openDetail(f.id) },
       el('span', { class: 'row-name', dir: 'auto' }, f.fav ? '★ ' : '', f.name,
-        f.custom ? el('span', { class: 'tag' }, 'mine') : null),
+        f.custom ? el('span', { class: 'tag' }, 'mine') : f.edited ? el('span', { class: 'tag' }, 'edited') : null),
       el('span', { class: 'row-sub', dir: 'ltr' }, f.last
         ? [`${fmt1(f.last.qty)} `, unitText(f.last.unit), ` · ${fmt(f.last.kcal)} kcal`]
         : foodSub(f))),
@@ -531,7 +550,10 @@ const doSearch = debounce(async () => {
   if (!q) { setTab(state.tab === 'quick' ? 'recent' : state.tab); return; }
   const res = await run(() => api('GET', `/api/foods/search?q=${encodeURIComponent(q)}`));
   if (!res || seq !== searchSeq || $('#search').value.trim() !== q) return;
-  renderResults(res.results, 'No matches. Try fewer or different words, or use Quick calories.');
+  renderResults(res.results, ['No matches. Try fewer or different words, use Quick calories, or ',
+    el('button', {
+      class: 'link', type: 'button', onclick: () => openFoodForm(null, { name: q, onSaved: (id) => openDetail(id) }),
+    }, `create “${q}” as a new food`), '.']);
 }, 180);
 
 $('#search').addEventListener('input', () => {
@@ -606,7 +628,7 @@ async function openDetail(foodId, entry) {
   state.add = { ...(state.add || {}), food, entry: entry || null, mode: entry ? 'edit' : 'add' };
   $('#d-name').textContent = food.name;
   setFav(food.fav);
-  $('#d-per100').textContent = `Per 100 g: ${fmt(food.kcal)} kcal · protein ${fmt1(food.protein)} g · carbs ${fmt1(food.carbs)} g · fat ${fmt1(food.fat)} g`;
+  $('#d-per100').textContent = `Per 100 g: ${fmt(food.kcal)} kcal · protein ${fmt1(food.protein)} g · carbs ${fmt1(food.carbs)} g · fat ${fmt1(food.fat)} g${food.edited ? ' · your values' : ''}`;
 
   const units = food.units.slice();
   if (entry && !units.some((u) => u.name === entry.unit)) {
@@ -640,6 +662,13 @@ function setFav(on) {
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
   b.title = on ? 'Remove from favorites' : 'Add to favorites';
 }
+
+$('#d-edit').addEventListener('click', () => {
+  const a = state.add;
+  if (!a || !a.food) return;
+  const { food, entry } = a;
+  openFoodForm(food.id, { onSaved: () => { if (addDlg.open) openDetail(food.id, entry || null); } });
+});
 
 $('#d-fav').addEventListener('click', async () => {
   const food = state.add && state.add.food;
@@ -735,75 +764,226 @@ $('#d-delete').addEventListener('click', () => deleteEntry());
 
 // ---------------------------------------------------------------- foods tab
 
+function foodRow(f, onclick) {
+  return el('li', {},
+    el('button', { class: 'row-main', type: 'button', onclick },
+      el('span', { class: 'row-name', dir: 'auto' }, f.name,
+        f.custom ? el('span', { class: 'tag' }, 'mine') : f.edited ? el('span', { class: 'tag' }, 'edited') : null),
+      el('span', { class: 'row-sub', dir: 'ltr' }, foodSub(f))));
+}
+
 async function loadFoods() {
   await loadQuick();
   const q = state.quick;
   if (!q) return;
-  const row = (f, onclick) => el('li', {},
-    el('button', { class: 'row-main', type: 'button', onclick },
-      el('span', { class: 'row-name', dir: 'auto' }, f.name),
-      el('span', { class: 'row-sub', dir: 'ltr' }, foodSub(f))));
   $('#my-foods').replaceChildren(...(q.mine.length
-    ? q.mine.map((f) => row(f, () => openFoodForm(f.id)))
+    ? q.mine.map((f) => foodRow(f, () => openFoodForm(f.id)))
     : [el('li', { class: 'list-empty' }, 'No custom foods yet.')]));
+  const edited = q.edited || [];
+  $('#edited-card').hidden = !edited.length;
+  $('#edited-foods').replaceChildren(...edited.map((f) => foodRow(f, () => openFoodForm(f.id))));
   $('#fav-foods').replaceChildren(...(q.favorites.length
-    ? q.favorites.map((f) => row(f, () => { openAdd(); openDetail(f.id); }))
+    ? q.favorites.map((f) => foodRow(f, () => { openAdd(); openDetail(f.id); }))
     : [el('li', { class: 'list-empty' }, 'No favorites yet.')]));
+  if ($('#foods-search').value.trim()) foodsSearch();
 }
 
+let foodsSeq = 0;
+const foodsSearch = debounce(async () => {
+  const q = $('#foods-search').value.trim();
+  const seq = ++foodsSeq;
+  if (!q) { $('#foods-results').replaceChildren(); return; }
+  const res = await run(() => api('GET', `/api/foods/search?q=${encodeURIComponent(q)}`));
+  if (!res || seq !== foodsSeq || $('#foods-search').value.trim() !== q) return;
+  $('#foods-results').replaceChildren(...(res.results.length
+    ? res.results.slice(0, 20).map((f) => foodRow(f, () => openFoodForm(f.id)))
+    : [el('li', { class: 'list-empty' }, 'No matches. ',
+      el('button', { class: 'link', type: 'button', onclick: () => openFoodForm(null, { name: q }) },
+        `Create “${q}” as a new food`))]));
+}, 200);
+$('#foods-search').addEventListener('input', foodsSearch);
+
+// ---------------------------------------------------------------- food editor
+//
+// Any food can be edited. Your own foods change in place. A food from the shared database keeps its
+// original for everyone else: your values are saved for you only and can be reset.
+
 const foodDlg = $('#food-dlg');
-let editingFood = null;
+const ff = $('#food-form');
+const NUTRIENT_FIELDS = ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium'];
+let editingFood = null; // the food from GET /api/foods/:id, or null for a new one
+let foodOnSaved = null; // called with the saved id
+let basisGrams = 100; // the shown values are for this many grams
+let unitKey = 0;
+
+const round1 = (v) => Math.round(v * 10) / 10;
+const iso = (t) => `⁨${t}⁩`; // keep Persian names from scrambling the English around them
+
 $('#new-food').addEventListener('click', () => openFoodForm(null));
 $('#food-close').addEventListener('click', () => foodDlg.close());
 foodDlg.addEventListener('click', (e) => { if (e.target === foodDlg) foodDlg.close(); });
+$('#food-unit-add').addEventListener('click', () => {
+  const row = unitRow();
+  $('#food-units').append(row);
+  $('.u-name', row).focus();
+});
 
-async function openFoodForm(id) {
-  const f = $('#food-form');
-  f.reset();
-  $('#food-error').textContent = '';
-  editingFood = null;
-  if (id) {
-    const food = await run(() => api('GET', `/api/foods/${id}`));
-    if (!food) return;
-    editingFood = food;
-    const serving = food.units.find((u) => u.name !== GRAM) || { name: GRAM, grams: 100 };
-    const k = serving.name === GRAM ? 1 : serving.grams / 100;
-    f.name.value = food.name;
-    f.serving_name.value = serving.name === GRAM ? '' : serving.name;
-    f.serving_grams.value = serving.name === GRAM ? 100 : serving.grams;
-    for (const n of ['kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium']) {
-      const v = food[n] * k;
-      f[n].value = v ? Math.round(v * 10) / 10 : '';
-    }
-  }
-  $('#food-title').textContent = id ? 'Edit food' : 'New food';
-  $('#food-delete').hidden = !id;
-  foodDlg.showModal();
+function unitRow(u) {
+  const row = el('div', { class: 'unit-row', 'data-k': String(++unitKey) },
+    el('input', {
+      class: 'u-name', dir: 'auto', maxlength: 40, placeholder: 'Name, e.g. slice', 'aria-label': 'Serving name',
+      value: u ? u.name : '',
+    }),
+    el('span', { class: 'input-unit' },
+      el('input', {
+        class: 'u-grams', inputmode: 'decimal', placeholder: 'Weight', 'aria-label': 'Weight in grams',
+        value: u ? String(Math.round(u.grams * 1000) / 1000) : '',
+      }),
+      el('span', {}, 'g')),
+    el('button', {
+      type: 'button', class: 'icon small', 'aria-label': 'Remove this serving size',
+      onclick: () => { row.remove(); renderBasis(); },
+    }, '✕'));
+  row.addEventListener('input', () => renderBasis());
+  return row;
 }
 
-$('#food-form').addEventListener('submit', async (e) => {
+function editorUnits() {
+  return $$('.unit-row', ff).map((r) => ({
+    key: r.dataset.k, name: $('.u-name', r).value.trim(), grams: toNum($('.u-grams', r).value),
+  }));
+}
+
+const basisOf = (v) => (v === 'g' ? 100 : (editorUnits().find((u) => u.key === v) || {}).grams || 100);
+
+/** Fill "Values below are for": 100 g or one of the serving sizes. */
+function renderBasis(want) {
+  const sel = $('#food-basis');
+  const keep = want ?? sel.value;
+  const opts = [el('option', { value: 'g' }, '100 g')];
+  for (const u of editorUnits()) {
+    if (u.name && u.grams > 0) opts.push(el('option', { value: u.key }, `1 × ${iso(u.name)} (${fmt1(u.grams)} g)`));
+  }
+  sel.replaceChildren(...opts);
+  sel.value = opts.some((o) => o.value === keep) ? keep : 'g';
+  basisGrams = basisOf(sel.value);
+}
+
+$('#food-basis').addEventListener('change', () => {
+  // Show the same food for the new amount.
+  const g = basisOf($('#food-basis').value);
+  for (const n of NUTRIENT_FIELDS) {
+    const raw = ff[n].value.trim();
+    const v = toNum(raw);
+    if (raw !== '' && v >= 0) ff[n].value = String(round1((v * g) / basisGrams));
+  }
+  basisGrams = g;
+});
+
+/** Open the editor for a food id, or for a new food (id null; opts.name prefills the name). */
+async function openFoodForm(id, opts = {}) {
+  let food = null;
+  if (id) {
+    food = await run(() => api('GET', `/api/foods/${id}`));
+    if (!food) return;
+  }
+  ff.reset();
+  $('#food-error').textContent = '';
+  editingFood = food;
+  foodOnSaved = opts.onSaved || null;
+  $('#food-units').replaceChildren();
+  if (food) {
+    ff.name.value = food.name;
+    for (const u of food.units) if (u.name !== GRAM) $('#food-units').append(unitRow(u));
+    // Your own foods were typed in per serving: show them that way again.
+    const first = $('.unit-row', ff);
+    renderBasis(food.custom && first ? first.dataset.k : 'g');
+    for (const n of NUTRIENT_FIELDS) {
+      const v = (food[n] * basisGrams) / 100;
+      ff[n].value = v ? String(round1(v)) : '';
+    }
+  } else {
+    ff.name.value = opts.name || '';
+    $('#food-units').append(unitRow());
+    renderBasis('g');
+  }
+  $('#food-title').textContent = food ? 'Edit food' : 'New food';
+  const note = $('#food-note');
+  note.hidden = !food || food.custom;
+  if (food && !food.custom) {
+    note.textContent = food.edited
+      ? `You changed this food. The original is “${food.original.name}”, ${fmt(food.original.kcal)} kcal per 100 g.`
+      : 'This food comes from the food database. Your changes are only for you.';
+  }
+  $('#food-delete').hidden = !(food && food.custom);
+  $('#food-reset').hidden = !(food && food.edited);
+  const uses = food ? food.uses : 0;
+  $('#food-update-row').hidden = !uses;
+  $('#food-update-text').textContent = `Also update the ${uses} time${uses === 1 ? '' : 's'} I logged it`;
+  foodDlg.showModal();
+  if (!food) ff.name.focus();
+}
+
+ff.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const f = e.target;
-  const body = { name: f.name.value.trim(), serving_name: f.serving_name.value.trim() || 'serving' };
-  for (const n of ['serving_grams', 'kcal', 'protein', 'carbs', 'fat', 'fiber', 'sugar', 'sodium']) {
-    const v = f[n].value.trim() === '' ? 0 : toNum(f[n].value);
-    if (!(v >= 0)) { $('#food-error').textContent = `Check the ${n.replace('_', ' ')} value`; return; }
+  const err = $('#food-error');
+  err.textContent = '';
+  const name = ff.name.value.trim();
+  if (!name) { err.textContent = 'Enter a name'; return; }
+  const units = [];
+  for (const u of editorUnits()) {
+    const gramsRaw = $(`.unit-row[data-k="${u.key}"] .u-grams`, ff).value.trim();
+    if (!u.name && !gramsRaw) continue; // empty row
+    if (!u.name) { err.textContent = 'Give every serving size a name'; return; }
+    if (!(u.grams > 0)) { err.textContent = `Enter how many grams “${u.name}” weighs`; return; }
+    units.push({ name: u.name, grams: u.grams });
+  }
+  const body = {
+    name, units, basis_grams: basisOf($('#food-basis').value),
+    update_entries: !$('#food-update-row').hidden && ff.update_entries.checked,
+  };
+  for (const n of NUTRIENT_FIELDS) {
+    const raw = ff[n].value.trim();
+    const v = raw === '' ? 0 : toNum(raw);
+    if (!(v >= 0)) { err.textContent = `Check the ${n} value`; return; }
     body[n] = v;
   }
-  const ok = await run(() => (editingFood
-    ? api('PUT', `/api/foods/${editingFood.id}`, body)
-    : api('POST', '/api/foods', body)), $('#food-error'));
-  if (!ok) return;
+  const food = editingFood;
+  const res = await run(() => (food ? api('PUT', `/api/foods/${food.id}`, body) : api('POST', '/api/foods', body)), err);
+  if (!res) return;
   foodDlg.close();
-  toast(editingFood ? 'Food updated' : 'Food created');
-  loadFoods();
+  toast(food
+    ? (res.updated_entries ? `Saved, and ${res.updated_entries} log entr${res.updated_entries === 1 ? 'y' : 'ies'} updated` : 'Food saved')
+    : 'Food created');
+  afterFoodChange(res.id, res.updated_entries);
+});
+
+$('#food-reset').addEventListener('click', async () => {
+  const food = editingFood;
+  if (!food || !confirm(`Go back to the original values of “${food.original.name}”?`)) return;
+  const update = !$('#food-update-row').hidden && ff.update_entries.checked;
+  const res = await run(() => api('POST', `/api/foods/${food.id}/reset`, { update_entries: update }));
+  if (!res) return;
+  foodDlg.close();
+  toast('Back to the original values');
+  afterFoodChange(food.id, res.updated_entries);
 });
 
 $('#food-delete').addEventListener('click', async () => {
-  if (!editingFood || !confirm(`Delete "${editingFood.name}"? Past log entries are kept.`)) return;
-  const ok = await run(() => api('DELETE', `/api/foods/${editingFood.id}`));
-  if (ok) { foodDlg.close(); toast('Food deleted'); loadFoods(); }
+  const food = editingFood;
+  if (!food || !confirm(`Delete "${food.name}"? Past log entries are kept.`)) return;
+  const ok = await run(() => api('DELETE', `/api/foods/${food.id}`));
+  if (ok) { foodDlg.close(); toast('Food deleted'); afterFoodChange(null); }
 });
+
+function afterFoodChange(id, updatedEntries) {
+  const cb = foodOnSaved;
+  foodOnSaved = null;
+  if (cb && id) cb(id);
+  if (!$('#view-foods').hidden) loadFoods();
+  else loadQuick();
+  if (updatedEntries && !$('#view-today').hidden) loadDay();
+}
 
 // ---------------------------------------------------------------- workouts
 
@@ -1585,4 +1765,5 @@ $('#pw-form').addEventListener('submit', async (e) => {
   if (ok) { f.reset(); toast('Password changed'); }
 });
 
-boot();
+// work.js loads after this file and adds the time, plan and to-do views, so start once everything is in.
+document.addEventListener('DOMContentLoaded', boot);

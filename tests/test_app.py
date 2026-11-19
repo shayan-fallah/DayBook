@@ -276,7 +276,7 @@ class AppTest(unittest.TestCase):
         self.assertIn("کباب", text)
         status, html = self.c.call("GET", "/", raw=True)
         self.assertEqual(status, 200)
-        self.assertIn(b"Calorie Tracker", html)
+        self.assertIn(b"Daybook", html)
         self.assertEqual(self.c.call("GET", "/static/../app.py", raw=True)[0], 404)
         self.assertEqual(self.c.call("GET", "/static/app.js", raw=True)[0], 200)
 

@@ -8,11 +8,16 @@ RUN mkdir -p $ANDROID_HOME/cmdline-tools \
  && unzip -q /tmp/tools.zip -d $ANDROID_HOME/cmdline-tools \
  && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest \
  && rm /tmp/tools.zip
+# sdkmanager's own downloads fail on slow or flaky connections ("Error on ZipFile unknown archive"),
+# so fetch the two packages the build needs with resumable curl and unpack them where sdkmanager would.
 RUN yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null \
- && for i in 1 2 3 4; do \
-      $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" > /dev/null && break; \
-      [ $i = 4 ] && exit 1; sleep 5; \
-    done
+ && cd /tmp \
+ && curl -fsSL -C - --retry 8 --retry-all-errors --retry-delay 3 https://dl.google.com/android/repository/platform-35_r02.zip -o platform.zip \
+ && curl -fsSL -C - --retry 8 --retry-all-errors --retry-delay 3 https://dl.google.com/android/repository/build-tools_r35_linux.zip -o build-tools.zip \
+ && mkdir -p $ANDROID_HOME/platforms $ANDROID_HOME/build-tools \
+ && unzip -q platform.zip && mv android-35 $ANDROID_HOME/platforms/android-35 \
+ && unzip -q build-tools.zip && mv android-15 $ANDROID_HOME/build-tools/35.0.0 \
+ && rm platform.zip build-tools.zip
 RUN curl -fsSL -C - --retry 8 --retry-all-errors --retry-delay 3 https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o /tmp/gradle.zip \
  && unzip -q /tmp/gradle.zip -d /opt && rm /tmp/gradle.zip
 ENV PATH=/opt/gradle-8.11.1/bin:$PATH

@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Search
@@ -57,6 +58,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,6 +95,7 @@ fun AddFoodScreen(vm: AppViewModel, initialMeal: String, snackbar: SnackbarHostS
     var results by remember { mutableStateOf<List<Food>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<Long?>(null) }
+    var newFood by remember { mutableStateOf<String?>(null) } // name for a food to create
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) { vm.loadQuick() }
@@ -168,6 +172,9 @@ fun AddFoodScreen(vm: AppViewModel, initialMeal: String, snackbar: SnackbarHostS
                         Box(Modifier.fillMaxWidth().padding(32.dp), Alignment.Center) { CircularProgressIndicator() }
                     } else if (list.isEmpty()) {
                         EmptyNote("No matches. Try fewer or different words, or use Quick calories.")
+                        TextButton(onClick = { newFood = query.trim() }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Create “${query.trim()}” as a new food")
+                        }
                     } else {
                         FoodList(list, onPick = { picked = it.id }, onReAdd = null)
                     }
@@ -182,11 +189,14 @@ fun AddFoodScreen(vm: AppViewModel, initialMeal: String, snackbar: SnackbarHostS
                         "mine" -> quick.mine
                         else -> quick.recent
                     }
+                    if (tab == "mine") {
+                        TextButton(onClick = { newFood = "" }) { Text("+ Create a new food") }
+                    }
                     if (list.isEmpty()) {
                         EmptyNote(
                             when (tab) {
                                 "favorites" -> "Tap ♡ on a food to add it to your favorites."
-                                "mine" -> "Create your own foods on the Foods tab."
+                                "mine" -> "Foods you create show up here."
                                 else -> "Foods you log show up here for one-tap adding."
                             },
                         )
@@ -210,6 +220,9 @@ fun AddFoodScreen(vm: AppViewModel, initialMeal: String, snackbar: SnackbarHostS
     picked?.let { id ->
         PortionSheet(vm, foodId = id, entry = null, initialMeal = meal, showMeal = false,
             onDismiss = { picked = null }, onDone = { picked = null })
+    }
+    newFood?.let { name ->
+        FoodEditorSheet(vm, foodId = null, initialName = name, onDismiss = { newFood = null }, onSaved = { picked = it })
     }
 }
 
@@ -268,8 +281,10 @@ fun PortionSheet(
     var qtyText by remember(foodId) { mutableStateOf("") }
     var meal by remember { mutableStateOf(initialMeal) }
     var busy by remember { mutableStateOf(false) }
+    var editFood by remember { mutableStateOf(false) }
+    var reload by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(foodId) {
+    LaunchedEffect(foodId, reload) {
         val f = vm.getFood(foodId)
         if (f == null) {
             onDismiss()
@@ -319,6 +334,9 @@ fun PortionSheet(
         ) {
             Row(verticalAlignment = Alignment.Top) {
                 FoodName(f.name, Modifier.weight(1f).padding(top = 8.dp), style = MaterialTheme.typography.titleLarge, maxLines = 3)
+                IconButton(onClick = { editFood = true }) {
+                    Icon(Icons.Filled.Edit, "Edit calories, macros and serving sizes", tint = p.muted)
+                }
                 IconButton(onClick = {
                     scope.launch { vm.toggleFavorite(f)?.let { food = f.copy(fav = it) } }
                 }) {
@@ -326,7 +344,8 @@ fun PortionSheet(
                     else Icon(Icons.Filled.FavoriteBorder, "Add to favorites", tint = p.muted)
                 }
             }
-            SubText("Per 100 g: ${fmt(f.kcal)} kcal · protein ${fmt1(f.protein)} g · carbs ${fmt1(f.carbs)} g · fat ${fmt1(f.fat)} g")
+            SubText("Per 100 g: ${fmt(f.kcal)} kcal · protein ${fmt1(f.protein)} g · carbs ${fmt1(f.carbs)} g · fat ${fmt1(f.fat)} g" +
+                if (f.edited) " · your values" else "")
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 NumberField(
@@ -404,6 +423,10 @@ fun PortionSheet(
                 ) { Text(if (entry != null) "Save" else "Add") }
             }
         }
+    }
+
+    if (editFood) {
+        FoodEditorSheet(vm, foodId = foodId, onDismiss = { editFood = false }, onSaved = { reload++ })
     }
 }
 

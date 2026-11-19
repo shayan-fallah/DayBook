@@ -15,6 +15,7 @@ import app.calorietracker.data.Day
 import app.calorietracker.data.Entry
 import app.calorietracker.data.FavReply
 import app.calorietracker.data.Food
+import app.calorietracker.data.FoodSaved
 import app.calorietracker.data.IdReply
 import app.calorietracker.data.Me
 import app.calorietracker.data.OkReply
@@ -80,9 +81,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var gym by mutableStateOf<WorkoutStats?>(null)
         private set
 
+    /** Time tracking, projects, to-dos and the planner. */
+    val work = WorkStore(viewModelScope, api, { handle(it) }, { toast(it) })
+
     init {
         // The day itself loads in onResume(), which runs when the screen first appears.
-        if (loggedIn) loadQuick()
+        if (loggedIn) {
+            loadQuick()
+            work.start()
+        }
     }
 
     // ------------------------------------------------------------ errors
@@ -140,6 +147,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         loggedIn = true
         loadDay()
         loadQuick()
+        work.start()
     }
 
     fun logout() {
@@ -159,6 +167,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         profile = null
         workoutMeta = null
         gym = null
+        work.reset()
     }
 
     suspend fun changePassword(current: String, new: String): Boolean = act {
@@ -196,6 +205,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             day = null
         }
         loadDay()
+        work.loadTimer()
+        if (work.recent != null) work.loadRecent()
+        if (work.week != null) work.loadWeek()
+        if (work.google != null) work.loadGoogle()
     }
 
     suspend fun addFood(foodId: Long, unit: String, qty: Double, meal: String): Boolean = act {
@@ -327,10 +340,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         null
     }
 
-    suspend fun saveCustomFood(id: Long?, body: JsonObject): Boolean = act {
-        if (id == null) api.post<IdReply>("/api/foods", body) else api.put<IdReply>("/api/foods/$id", body)
+    /** Create (id = null) or edit any food. Returns the saved food's id, or null on error. */
+    suspend fun saveFood(id: Long?, body: JsonObject): Long? = try {
+        val r: FoodSaved = if (id == null) api.post("/api/foods", body) else api.put("/api/foods/$id", body)
         loadQuick()
-        toast(if (id == null) "Food created" else "Food updated")
+        toast(
+            when {
+                id == null -> "Food created"
+                r.updatedEntries > 0 -> "Saved, and ${r.updatedEntries} log entr${if (r.updatedEntries == 1) "y" else "ies"} updated"
+                else -> "Food saved"
+            },
+        )
+        if (r.updatedEntries > 0) loadDay()
+        r.id
+    } catch (e: ApiException) {
+        handle(e)
+        null
+    }
+
+    /** Go back to the database's values for a food this user edited. */
+    suspend fun resetFood(id: Long, updateEntries: Boolean): Boolean = act {
+        val r: FoodSaved = api.post("/api/foods/$id/reset", jsonBody("update_entries" to updateEntries))
+        loadQuick()
+        toast("Back to the original values")
+        if (r.updatedEntries > 0) loadDay()
     }
 
     suspend fun deleteCustomFood(id: Long): Boolean = act {

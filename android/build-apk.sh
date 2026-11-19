@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Android app inside Docker, so you don't need Android Studio.
-# Output: android/calorie-tracker.apk
+# Output: android/daybook.apk
 set -euo pipefail
 cd "$(dirname "$0")"
 IMAGE=calorie-android-build
@@ -14,7 +14,7 @@ if [ ! -f signing/keystore.properties ]; then
   PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)
   docker run --rm -v "$PWD/signing:/out" "$IMAGE" bash -c "
     keytool -genkeypair -keystore /out/release.jks -storepass '$PASS' -keypass '$PASS' \
-      -alias calories -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Calorie Tracker' >/dev/null 2>&1
+      -alias calories -keyalg RSA -keysize 2048 -validity 10000 -dname 'CN=Daybook' >/dev/null 2>&1
     chown $(id -u):$(id -g) /out/release.jks"
   printf 'storeFile=signing/release.jks\nstorePassword=%s\nkeyAlias=calories\nkeyPassword=%s\n' "$PASS" "$PASS" > signing/keystore.properties
   chmod 600 signing/keystore.properties
@@ -27,7 +27,7 @@ docker run --rm \
     set -e
     [ -f gradlew ] || gradle wrapper --gradle-version 8.11.1 -q
     gradle testReleaseUnitTest assembleRelease --no-daemon --console=plain -q
-    cp app/build/outputs/apk/release/app-release.apk calorie-tracker.apk
+    cp app/build/outputs/apk/release/app-release.apk daybook.apk
     chown -R $(id -u):$(id -g) /project"
 
-echo "Built: $PWD/calorie-tracker.apk"
+echo "Built: $PWD/daybook.apk"

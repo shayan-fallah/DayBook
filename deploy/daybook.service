@@ -1,0 +1,30 @@
+# systemd unit. Install:
+#   sudo cp deploy/daybook.service /etc/systemd/system/
+#   (edit User= and the paths below to match where you put the app)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now daybook
+[Unit]
+Description=Daybook (food, gym, time tracking, planner)
+After=network.target
+
+[Service]
+User=tracker
+WorkingDirectory=/opt/daybook
+ExecStart=/usr/bin/python3 /opt/daybook/app.py
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+Environment=DATA_DIR=/opt/daybook/data
+Environment=TRUST_PROXY=1
+Environment=PYTHONUNBUFFERED=1
+# Google Calendar (optional, see README):
+#Environment=PUBLIC_URL=https://daybook.example.com
+#Environment=GOOGLE_CLIENT_ID=1234-abc.apps.googleusercontent.com
+#Environment=GOOGLE_CLIENT_SECRET=GOCSPX-...
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/daybook/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

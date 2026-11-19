@@ -9,6 +9,10 @@ services:
     environment:
       TRUST_PROXY: "1"        # read the real client IP from X-Forwarded-For
       # ALLOW_SIGNUP: "1"     # let anyone create an account (off by default)
+      # For Google Calendar (see README):
+      # PUBLIC_URL: "https://daybook.example.com"
+      # GOOGLE_CLIENT_ID: "1234-abc.apps.googleusercontent.com"
+      # GOOGLE_CLIENT_SECRET: "GOCSPX-..."
     volumes:
       - calories-data:/data
 

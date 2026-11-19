@@ -109,7 +109,7 @@ fun LoginScreen(vm: AppViewModel, snackbar: SnackbarHostState) {
             verticalArrangement = Arrangement.Center,
         ) {
             Column(Modifier.widthIn(max = 420.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Calorie Tracker", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Text("Daybook", fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
                     if (signup) "Create your account on your server." else "Log in to your server.",
                     color = palette.ink2,
@@ -119,7 +119,7 @@ fun LoginScreen(vm: AppViewModel, snackbar: SnackbarHostState) {
                     value = server,
                     onValueChange = { server = it.trim() },
                     label = { Text("Server address") },
-                    placeholder = { Text("calories.example.com or 1.2.3.4:8080") },
+                    placeholder = { Text("daybook.example.com or 1.2.3.4:8080") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calorie tracker: a small self-hosted web app.
+"""Daybook: food, workouts, time tracking and planning. A small self-hosted web app.
 
 Python 3.9+ standard library only. Data lives in one SQLite file.
 
@@ -8,6 +8,8 @@ Python 3.9+ standard library only. Data lives in one SQLite file.
     python3 app.py passwd NAME     # reset a password
     python3 app.py users           # list accounts
     python3 app.py backup FILE     # safe copy of the database (works while running)
+    python3 app.py import-sakura FILE NAME
+                                   # copy projects, tasks and time from Sakura Log (logger.db or backup .json)
 """
 import csv
 import datetime as dt
@@ -24,9 +26,13 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
+import urllib.error
+import urllib.request
+from html import escape as html_escape
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -37,6 +43,16 @@ STATIC_DIR = os.path.join(BASE, "static")
 ALLOW_SIGNUP = os.environ.get("ALLOW_SIGNUP", "0") == "1"
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "0") == "1"
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "auto")  # auto | 1 | 0
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")  # e.g. https://tracker.example.com
+
+# Google Calendar (optional). Create an OAuth client in Google Cloud, see README.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_AUTH_URL = os.environ.get("GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth")
+GOOGLE_TOKEN_URL = os.environ.get("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
+GOOGLE_REVOKE_URL = os.environ.get("GOOGLE_REVOKE_URL", "https://oauth2.googleapis.com/revoke")
+GOOGLE_API = os.environ.get("GOOGLE_API_URL", "https://www.googleapis.com/calendar/v3")
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.readonly"
 
 COOKIE_NAME = "ct_session"
 SESSION_DAYS = 180
@@ -156,6 +172,48 @@ CREATE TABLE IF NOT EXISTS workouts (
     kcal INTEGER NOT NULL DEFAULT 0, kcal_manual INTEGER NOT NULL DEFAULT 0,
     notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS workouts_user_date ON workouts(user_id, date);
+CREATE TABLE IF NOT EXISTS food_overrides (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, food_id INTEGER NOT NULL,
+    name TEXT NOT NULL, norm TEXT NOT NULL, compact TEXT NOT NULL,
+    kcal REAL, protein REAL, carbs REAL, fat REAL, fiber REAL, sugar REAL, sodium REAL,
+    units TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (user_id, food_id));
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '#2a78d6', archived INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS projects_user ON projects(user_id);
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', due TEXT, priority INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0, done_at INTEGER, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, done);
+CREATE TABLE IF NOT EXISTS time_entries (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    description TEXT NOT NULL DEFAULT '', start_ts INTEGER NOT NULL, end_ts INTEGER);
+CREATE INDEX IF NOT EXISTS time_user_start ON time_entries(user_id, start_ts);
+CREATE TABLE IF NOT EXISTS plan_blocks (
+    id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    start_ts INTEGER NOT NULL, end_ts INTEGER NOT NULL, series TEXT,
+    gcal_id TEXT, gcal_cal TEXT, gcal_dirty INTEGER NOT NULL DEFAULT 1, gcal_pushed TEXT, gcal_error TEXT,
+    updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS plan_user_start ON plan_blocks(user_id, start_ts);
+CREATE TABLE IF NOT EXISTS gcal_deletes (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, cal TEXT NOT NULL, event_id TEXT NOT NULL,
+    PRIMARY KEY (user_id, cal, event_id));
+CREATE TABLE IF NOT EXISTS google_accounts (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    refresh_token TEXT NOT NULL, access_token TEXT, access_expires INTEGER NOT NULL DEFAULT 0,
+    email TEXT, calendar_id TEXT NOT NULL DEFAULT 'primary', show_events INTEGER NOT NULL DEFAULT 1,
+    connected_at INTEGER NOT NULL, last_sync INTEGER, last_error TEXT, needs_reauth INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    redirect_uri TEXT NOT NULL, expires INTEGER NOT NULL);
 """
 
 
@@ -180,7 +238,8 @@ def init_db(verbose=True):
 def migrate(db):
     """Bring databases from older versions up to date."""
     cols = {r[1] for r in db.execute("PRAGMA table_info(profiles)")}
-    for name, ddl in (("exercise_pct", "INTEGER DEFAULT 100"), ("workout_goal", "INTEGER DEFAULT 4")):
+    for name, ddl in (("exercise_pct", "INTEGER DEFAULT 100"), ("workout_goal", "INTEGER DEFAULT 4"),
+                      ("prefs", "TEXT"), ("ics_token", "TEXT")):
         if name not in cols:
             db.execute(f"ALTER TABLE profiles ADD COLUMN {name} {ddl}")
     # Calories typed into the old "Exercise" box become workouts, so there is one place for them.
@@ -377,12 +436,34 @@ def entry_json(r):
 
 
 def get_food(db, uid, food_id):
+    """The food as this user sees it: their own edits of a dataset food replace its values. None if not found."""
     row = db.execute("SELECT * FROM foods WHERE id=? AND (user_id IS NULL OR user_id=?)",
                      (food_id, uid)).fetchone()
-    return row
+    if not row:
+        return None
+    food = dict(row)
+    food["edited"] = False
+    food["edited_units"] = None
+    if row["user_id"] is None:
+        o = db.execute("SELECT * FROM food_overrides WHERE user_id=? AND food_id=?", (uid, food_id)).fetchone()
+        if o:
+            food["original"] = {k: food[k] for k in ("name",) + NUTRIENTS}
+            food.update({k: o[k] for k in ("name",) + NUTRIENTS})
+            food["edited"] = True
+            food["edited_units"] = o["units"]
+    return food
 
 
-def food_units(db, food_id):
+def _units_from_json(raw):
+    """Units saved with a user's edit: the units they listed, then grams."""
+    units = [{"name": n, "grams": g} for n, g in json.loads(raw)]
+    return units + [{"name": GRAM_UNIT, "grams": 1}]
+
+
+def food_units(db, food_id, food=None):
+    """Units of a food, grams last. Pass `food` from get_food() to use the user's edited units."""
+    if food is not None and food.get("edited_units"):
+        return _units_from_json(food["edited_units"])
     return [{"name": r["name"], "grams": r["grams"]}
             for r in db.execute("SELECT name, grams FROM units WHERE food_id=? ORDER BY name='گرم', ord", (food_id,))]
 
@@ -392,7 +473,7 @@ def compute_portion(db, uid, food_id, unit, qty):
     food = get_food(db, uid, food_id)
     if not food:
         return None
-    u = db.execute("SELECT grams FROM units WHERE food_id=? AND name=?", (food_id, unit)).fetchone()
+    u = next((x for x in food_units(db, food_id, food) if x["name"] == unit), None)
     if not u:
         raise ApiError(400, "Unknown unit for this food")
     grams = u["grams"] * qty
@@ -468,6 +549,7 @@ def route(method, pattern, auth=True):
 class Ctx:
     def __init__(self, handler, db, uid, body, query):
         self.handler, self.db, self.uid, self.body, self.query = handler, db, uid, body, query
+        self.after = []  # callbacks to run once the request's changes are committed
 
     def q(self, key, default=None):
         return self.query.get(key, [default])[0]
@@ -538,18 +620,25 @@ def api_password(c):
 
 # --- foods
 
-FOOD_LIST_SQL = """
-SELECT f.id, f.name, f.kcal, f.protein, f.carbs, f.fat, f.source, f.user_id,
+# Every food list reads through this: the user's edits of dataset foods (food_overrides) replace its values.
+FOOD_SELECT = """
+SELECT f.id, COALESCE(o.name, f.name) AS name, COALESCE(o.kcal, f.kcal) AS kcal,
+       COALESCE(o.protein, f.protein) AS protein, COALESCE(o.carbs, f.carbs) AS carbs,
+       COALESCE(o.fat, f.fat) AS fat, f.source, f.user_id, o.units AS edited_units, (o.food_id IS NOT NULL) AS edited,
        (SELECT name || '|' || grams FROM units WHERE food_id=f.id ORDER BY name='گرم', ord LIMIT 1) AS unit1,
        (SELECT 1 FROM favorites WHERE user_id=:uid AND food_id=f.id) AS fav
+FROM foods f LEFT JOIN food_overrides o ON o.user_id=:uid AND o.food_id=f.id
 """
+F_NAME, F_NORM, F_COMPACT = "COALESCE(o.name, f.name)", "COALESCE(o.norm, f.norm)", "COALESCE(o.compact, f.compact)"
 
 
 def food_brief(r):
     out = {"id": r["id"], "name": r["name"], "kcal": rnd(r["kcal"], 0), "protein": rnd(r["protein"]),
            "carbs": rnd(r["carbs"]), "fat": rnd(r["fat"]), "custom": r["user_id"] is not None,
-           "source": r["source"] or "", "fav": bool(r["fav"])}
-    if r["unit1"]:
+           "edited": bool(r["edited"]), "source": r["source"] or "", "fav": bool(r["fav"])}
+    if r["edited_units"]:
+        out["unit1"] = _units_from_json(r["edited_units"])[0]
+    elif r["unit1"]:
         name, grams = r["unit1"].rsplit("|", 1)
         out["unit1"] = {"name": name, "grams": float(grams)}
     return out
@@ -566,28 +655,27 @@ def api_search(c):
     conds = []
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
-        conds.append(f"(f.norm LIKE :w{i} OR f.compact LIKE :w{i})")
-    sql = FOOD_LIST_SQL + f"""
-    FROM foods f
+        conds.append(f"({F_NORM} LIKE :w{i} OR {F_COMPACT} LIKE :w{i})")
+    sql = FOOD_SELECT + f"""
     LEFT JOIN (SELECT food_id, COUNT(*) AS c FROM entries WHERE user_id=:uid AND food_id IS NOT NULL
                GROUP BY food_id) u ON u.food_id = f.id
-    WHERE (f.user_id IS NULL OR f.user_id=:uid) AND (({' AND '.join(conds)}) OR f.compact LIKE :compact)
-    ORDER BY (f.norm = :exact) DESC, fav DESC, COALESCE(u.c, 0) DESC, (f.norm LIKE :prefix) DESC,
-             (' ' || f.norm LIKE :word1) DESC, (f.user_id IS NOT NULL) DESC, f.rank, length(f.norm)
+    WHERE (f.user_id IS NULL OR f.user_id=:uid) AND (({' AND '.join(conds)}) OR {F_COMPACT} LIKE :compact)
+    ORDER BY ({F_NORM} = :exact) DESC, fav DESC, COALESCE(u.c, 0) DESC, ({F_NORM} LIKE :prefix) DESC,
+             (' ' || {F_NORM} LIKE :word1) DESC, (f.user_id IS NOT NULL) DESC, f.rank, length({F_NORM})
     LIMIT :limit"""
     return {"results": [food_brief(r) for r in c.db.execute(sql, params)]}
 
 
 @route("GET", "/api/foods/quick")
 def api_quick(c):
-    """Recent foods (with last-used portion), favorites and the user's custom foods."""
+    """Recent foods (with last-used portion), favorites, the user's custom foods and edited dataset foods."""
     recent = []
     for r in c.db.execute("""
-        SELECT e.food_id, e.unit, e.qty, e.kcal, MAX(e.id) AS last_id, COUNT(*) AS uses
+        SELECT e.food_id, MAX(e.id) AS last_id, COUNT(*) AS uses
         FROM entries e WHERE e.user_id=? AND e.food_id IS NOT NULL
         GROUP BY e.food_id ORDER BY last_id DESC LIMIT 25""", (c.uid,)).fetchall():
         last = c.db.execute("SELECT unit, qty, kcal FROM entries WHERE id=?", (r["last_id"],)).fetchone()
-        f = c.db.execute(FOOD_LIST_SQL + " FROM foods f WHERE f.id=:fid AND (f.user_id IS NULL OR f.user_id=:uid)",
+        f = c.db.execute(FOOD_SELECT + " WHERE f.id=:fid AND (f.user_id IS NULL OR f.user_id=:uid)",
                          {"uid": c.uid, "fid": r["food_id"]}).fetchone()
         if f:
             item = food_brief(f)
@@ -595,72 +683,149 @@ def api_quick(c):
             item["uses"] = r["uses"]
             recent.append(item)
     favs = [food_brief(r) for r in c.db.execute(
-        FOOD_LIST_SQL + " FROM favorites v JOIN foods f ON f.id=v.food_id WHERE v.user_id=:uid "
-        "AND (f.user_id IS NULL OR f.user_id=:uid) ORDER BY f.name", {"uid": c.uid})]
+        FOOD_SELECT + f" JOIN favorites v ON v.food_id=f.id AND v.user_id=:uid "
+        f"WHERE (f.user_id IS NULL OR f.user_id=:uid) ORDER BY {F_NAME}", {"uid": c.uid})]
     mine = [food_brief(r) for r in c.db.execute(
-        FOOD_LIST_SQL + " FROM foods f WHERE f.user_id=:uid ORDER BY f.name", {"uid": c.uid})]
-    return {"recent": recent, "favorites": favs, "mine": mine}
+        FOOD_SELECT + " WHERE f.user_id=:uid ORDER BY f.name", {"uid": c.uid})]
+    edited = [food_brief(r) for r in c.db.execute(
+        FOOD_SELECT + " WHERE f.user_id IS NULL AND o.food_id IS NOT NULL ORDER BY o.name", {"uid": c.uid})]
+    return {"recent": recent, "favorites": favs, "mine": mine, "edited": edited}
 
 
 @route("GET", r"/api/foods/(\d+)")
 def api_food(c, food_id):
-    f = c.db.execute(FOOD_LIST_SQL + ", f.fiber, f.sugar, f.sodium FROM foods f "
-                     "WHERE f.id=:fid AND (f.user_id IS NULL OR f.user_id=:uid)",
-                     {"uid": c.uid, "fid": int(food_id)}).fetchone()
+    f = get_food(c.db, c.uid, int(food_id))
     if not f:
         raise ApiError(404, "Food not found")
-    out = food_brief(f)
-    out.update({"fiber": rnd(f["fiber"]), "sugar": rnd(f["sugar"]), "sodium": rnd(f["sodium"], 0),
-                "units": food_units(c.db, f["id"])})
+    fav = c.db.execute("SELECT 1 FROM favorites WHERE user_id=? AND food_id=?", (c.uid, f["id"])).fetchone()
+    units = food_units(c.db, f["id"], f)
+    out = {"id": f["id"], "name": f["name"], "custom": f["user_id"] is not None, "edited": f["edited"],
+           "source": f["source"] or "", "fav": bool(fav), "units": units}
+    for k in NUTRIENTS:
+        out[k] = rnd(f[k], 0 if k in ("kcal", "sodium") else 1)
+    out["unit1"] = units[0] if units else None
+    if f["edited"]:
+        orig = f["original"]
+        out["original"] = {"name": orig["name"], **{k: rnd(orig[k], 0 if k in ("kcal", "sodium") else 1)
+                                                    for k in NUTRIENTS}}
     last = c.db.execute("SELECT unit, qty FROM entries WHERE user_id=? AND food_id=? ORDER BY id DESC LIMIT 1",
                         (c.uid, f["id"])).fetchone()
     out["last"] = dict(last) if last else None
+    out["uses"] = c.db.execute("SELECT COUNT(*) FROM entries WHERE user_id=? AND food_id=?",
+                               (c.uid, f["id"])).fetchone()[0]
     return out
 
 
-def _custom_food_values(b):
+def _food_values(b, creating=False):
+    """Validate the food editor. Returns (name, nutrients per 100 g, extra units [(name, grams)]).
+
+    The current editor sends `units` (any number of named portions) and the nutrients for `basis_grams` grams.
+    Older app versions send one serving (`serving_name`, `serving_grams`) and the nutrients per serving.
+    """
     name = text(b.get("name"), "Name", 100)
-    serving_name = text(b.get("serving_name") or "serving", "Serving name", 40)
-    serving_g = number(b.get("serving_grams"), "Serving size (g)", 0.1, 5000)
-    per = 100.0 / serving_g  # convert per-serving values to per-100 g
+    if "units" in b:
+        basis = number(b.get("basis_grams", 100), "Amount the values are for", 0.1, 5000)
+        raw = b.get("units") or []
+        if not isinstance(raw, list) or len(raw) > 30:
+            raise ApiError(400, "Invalid units")
+        units, seen = [], set()
+        for u in raw:
+            if not isinstance(u, dict):
+                raise ApiError(400, "Invalid units")
+            un = text(u.get("name"), "Unit name", 40)
+            if un in (GRAM_UNIT, "g", "gram", "grams"):
+                continue  # grams are always available
+            if un in seen:
+                raise ApiError(400, f"The unit “{un}” is listed twice")
+            seen.add(un)
+            units.append((un, round(number(u.get("grams"), f"Weight of “{un}” (g)", 0.01, 5000), 3)))
+    else:
+        serving_name = text(b.get("serving_name") or "serving", "Serving name", 40)
+        basis = number(b.get("serving_grams"), "Serving size (g)", 0.1, 5000)
+        units = [] if serving_name == GRAM_UNIT else [(serving_name, basis)]
+    per = 100.0 / basis  # convert to per-100 g
     vals = {k: number(b.get(k) or 0, k, 0, 100000) * per for k in NUTRIENTS}
-    if vals["kcal"] <= 0 and not any(vals[k] for k in ("protein", "carbs", "fat")):
+    if creating and vals["kcal"] <= 0 and not any(vals[k] for k in ("protein", "carbs", "fat")):
         raise ApiError(400, "Enter calories or macros")
-    return name, serving_name, serving_g, vals
+    return name, vals, units
 
 
-def _save_custom_units(db, food_id, serving_name, serving_g):
+def _save_custom_units(db, food_id, units):
     db.execute("DELETE FROM units WHERE food_id=?", (food_id,))
-    db.execute("INSERT INTO units (food_id, name, grams, ord) VALUES (?,?,?,0)", (food_id, serving_name, serving_g))
-    if serving_name != GRAM_UNIT:
-        db.execute("INSERT INTO units (food_id, name, grams, ord) VALUES (?,?,1,1)", (food_id, GRAM_UNIT))
+    db.executemany("INSERT INTO units (food_id, name, grams, ord) VALUES (?,?,?,?)",
+                   [(food_id, n, g, i) for i, (n, g) in enumerate(units)])
+    db.execute("INSERT INTO units (food_id, name, grams, ord) VALUES (?,?,1,1000)", (food_id, GRAM_UNIT))
+
+
+def _refresh_entries(db, uid, food_id):
+    """Recalculate this user's log entries of a food from its current values. Returns how many changed."""
+    food = get_food(db, uid, food_id)
+    if not food:
+        return 0
+    grams_of = {u["name"]: u["grams"] for u in food_units(db, food_id, food)}
+    n = 0
+    for e in db.execute("SELECT id, unit, qty, grams FROM entries WHERE user_id=? AND food_id=?",
+                        (uid, food_id)).fetchall():
+        grams = grams_of[e["unit"]] * e["qty"] if e["unit"] in grams_of and e["qty"] else (e["grams"] or 0)
+        f = grams / 100.0
+        db.execute("UPDATE entries SET name=?, grams=?, kcal=?, protein=?, carbs=?, fat=?, fiber=?, sugar=?, sodium=? "
+                   "WHERE id=?", (food["name"], round(grams, 2), *[(food[k] or 0) * f for k in NUTRIENTS], e["id"]))
+        n += 1
+    return n
 
 
 @route("POST", "/api/foods")
 def api_food_create(c):
-    name, serving_name, serving_g, v = _custom_food_values(c.body)
+    name, v, units = _food_values(c.body, creating=True)
     max_id = c.db.execute("SELECT MAX(id) FROM foods").fetchone()[0] or 0
     fid = max(max_id, CUSTOM_ID_BASE) + 1
     norm = normalize(name)
     c.db.execute("INSERT INTO foods (id, user_id, name, norm, compact, source, rank, kcal, protein, carbs, fat, "
                  "fiber, sugar, sodium) VALUES (?,?,?,?,?,'',0,?,?,?,?,?,?,?)",
                  (fid, c.uid, name, norm, norm.replace(" ", ""), *[v[k] for k in NUTRIENTS]))
-    _save_custom_units(c.db, fid, serving_name, serving_g)
+    _save_custom_units(c.db, fid, units)
     return {"id": fid}
 
 
 @route("PUT", r"/api/foods/(\d+)")
 def api_food_update(c, food_id):
+    """Edit any food. Your own foods change in place; a dataset food gets a personal copy of its values
+    (only you see it, and the original stays available through reset)."""
     fid = int(food_id)
-    if not c.db.execute("SELECT 1 FROM foods WHERE id=? AND user_id=?", (fid, c.uid)).fetchone():
-        raise ApiError(404, "Custom food not found")
-    name, serving_name, serving_g, v = _custom_food_values(c.body)
+    food = get_food(c.db, c.uid, fid)
+    if not food:
+        raise ApiError(404, "Food not found")
+    name, v, units = _food_values(c.body)
     norm = normalize(name)
-    c.db.execute("UPDATE foods SET name=?, norm=?, compact=?, kcal=?, protein=?, carbs=?, fat=?, fiber=?, "
-                 "sugar=?, sodium=? WHERE id=?",
-                 (name, norm, norm.replace(" ", ""), *[v[k] for k in NUTRIENTS], fid))
-    _save_custom_units(c.db, fid, serving_name, serving_g)
-    return {"id": fid}
+    if food["user_id"] is not None:
+        c.db.execute("UPDATE foods SET name=?, norm=?, compact=?, kcal=?, protein=?, carbs=?, fat=?, fiber=?, "
+                     "sugar=?, sodium=? WHERE id=?",
+                     (name, norm, norm.replace(" ", ""), *[v[k] for k in NUTRIENTS], fid))
+        _save_custom_units(c.db, fid, units)
+    else:
+        dataset = [(r["name"], round(r["grams"], 3)) for r in c.db.execute(
+            "SELECT name, grams FROM units WHERE food_id=? AND name<>? ORDER BY ord", (fid, GRAM_UNIT))]
+        # Keep following the dataset's units unless they were actually changed.
+        same = len(units) == len(dataset) and all(
+            n1 == n2 and abs(g1 - g2) < 0.01 for (n1, g1), (n2, g2) in zip(units, dataset))
+        units_json = None if same else json.dumps(units, ensure_ascii=False)
+        c.db.execute("INSERT OR REPLACE INTO food_overrides (user_id, food_id, name, norm, compact, kcal, protein, "
+                     "carbs, fat, fiber, sugar, sodium, units, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (c.uid, fid, name, norm, norm.replace(" ", ""), *[v[k] for k in NUTRIENTS], units_json,
+                      now_iso()))
+    updated = _refresh_entries(c.db, c.uid, fid) if c.body.get("update_entries") else 0
+    return {"id": fid, "updated_entries": updated}
+
+
+@route("POST", r"/api/foods/(\d+)/reset")
+def api_food_reset(c, food_id):
+    """Drop your edits of a dataset food and go back to the original values."""
+    fid = int(food_id)
+    cur = c.db.execute("DELETE FROM food_overrides WHERE user_id=? AND food_id=?", (c.uid, fid))
+    if not cur.rowcount:
+        raise ApiError(404, "This food has no edits")
+    updated = _refresh_entries(c.db, c.uid, fid) if c.body.get("update_entries") else 0
+    return {"id": fid, "updated_entries": updated}
 
 
 @route("DELETE", r"/api/foods/(\d+)")
@@ -1191,6 +1356,21 @@ def api_export(c):
             x = workout_json(r)
             w.writerow([x["date"], x["name"], x["minutes"], x["intensity"], " ".join(x["muscles"]),
                         x["distance_km"], x["kcal"], x["notes"]])
+    elif kind == "time":
+        # Times in the viewer's timezone: `tz` is minutes east of UTC; `from`/`to` limit the range.
+        tz = dt.timezone(dt.timedelta(minutes=int(number(c.q("tz", "0"), "tz", -900, 900))))
+        frm, to = ts_value(c.q("from"), "from", True) or 0, ts_value(c.q("to"), "to", True) or TS_MAX
+        projects = {r[0]: r[1] for r in c.db.execute("SELECT id, name FROM projects WHERE user_id=?", (c.uid,))}
+        tasks = {r[0]: r[1] for r in c.db.execute("SELECT id, title FROM tasks WHERE user_id=?", (c.uid,))}
+        w.writerow(["date", "start", "end", "hours", "project", "task", "description"])
+        t = now_ts()
+        for r in c.db.execute("SELECT * FROM time_entries WHERE user_id=? AND start_ts<? AND COALESCE(end_ts, ?)>? "
+                              "ORDER BY start_ts", (c.uid, to, t, frm)):
+            s = dt.datetime.fromtimestamp(r["start_ts"], tz)
+            e = dt.datetime.fromtimestamp(r["end_ts"], tz) if r["end_ts"] else None
+            w.writerow([s.date().isoformat(), s.strftime("%H:%M"), e.strftime("%H:%M") if e else "running",
+                        round(((r["end_ts"] or t) - r["start_ts"]) / 3600, 2), projects.get(r["project_id"], ""),
+                        tasks.get(r["task_id"], ""), r["description"]])
     else:
         kind = "entries"
         cols = ["date", "meal", "name", "qty", "unit", "grams", *NUTRIENTS]
@@ -1199,12 +1379,1062 @@ def api_export(c):
             w.writerow([round(v, 2) if isinstance(v, float) else v for v in r])
     data = ("﻿" + buf.getvalue()).encode("utf-8")  # BOM so Excel shows Persian correctly
     return RawResponse(data, "text/csv; charset=utf-8",
-                       {"Content-Disposition": f'attachment; filename="calories-{kind}.csv"'})
+                       {"Content-Disposition": f'attachment; filename="daybook-{kind}.csv"'})
 
 
 class RawResponse:
     def __init__(self, data, ctype, headers=None):
         self.data, self.ctype, self.headers = data, ctype, headers or {}
+
+
+# ---------------------------------------------------------------- time tracking, to-dos and planning
+#
+# Times are Unix seconds (UTC). Days, weeks and months depend on the viewer's timezone, so the apps ask for
+# ranges in seconds and do the calendar math themselves.
+
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+PROJECT_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#8b6cf0", "#e0508f", "#e8a317", "#14a3b8", "#d03b3b")
+TS_MIN, TS_MAX = 946684800, 4102444800  # 2000 .. 2100
+MAX_ENTRY_SECONDS = 7 * 86400
+DEFAULT_PREFS = {"work_goal": 8, "week_start": "auto", "calendar": "gregorian"}
+WEEK_STARTS = ("auto", "sat", "sun", "mon")
+
+
+def now_ts():
+    return int(time.time())
+
+
+def ts_value(value, field, allow_none=False):
+    if value is None or value == "":
+        if allow_none:
+            return None
+        raise ApiError(400, f"{field} is required")
+    if isinstance(value, bool):
+        raise ApiError(400, f"Invalid {field}")
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise ApiError(400, f"Invalid {field}")
+    if not TS_MIN <= v <= TS_MAX:
+        raise ApiError(400, f"{field} is out of range")
+    return v
+
+
+def ref_id(value, field):
+    """An optional id (project, task) from a request."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ApiError(400, f"Invalid {field}")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ApiError(400, f"Invalid {field}")
+
+
+def owned(db, table, uid, id_, what):
+    row = db.execute(f"SELECT * FROM {table} WHERE id=? AND user_id=?", (id_, uid)).fetchone()
+    if not row:
+        raise ApiError(404, f"{what} not found")
+    return row
+
+
+def long_text(value, field, max_len):
+    """Free text that keeps its line breaks, like notes."""
+    s = str(value or "").replace("\r\n", "\n").strip()
+    if len(s) > max_len:
+        raise ApiError(400, f"{field} is too long (at most {max_len} characters)")
+    return s
+
+
+def project_task_refs(db, uid, project_id, task_id):
+    """Check that a project and task belong to the user. A task in a project implies that project."""
+    if task_id is not None:
+        t = owned(db, "tasks", uid, task_id, "Task")
+        if t["project_id"] is not None:
+            if project_id is not None and project_id != t["project_id"]:
+                raise ApiError(400, "That task belongs to another project")
+            project_id = t["project_id"]
+    if project_id is not None:
+        owned(db, "projects", uid, project_id, "Project")
+    return project_id, task_id
+
+
+def sums_by(db, column, uid):
+    """Seconds logged per project or task (a running timer counts up to now)."""
+    return {r[0]: r[1] for r in db.execute(
+        f"SELECT {column}, SUM(COALESCE(end_ts, ?) - start_ts) FROM time_entries WHERE user_id=? GROUP BY {column}",
+        (now_ts(), uid))}
+
+
+def kick_google(c):
+    c.after.append(lambda: GSYNC and GSYNC.kick(c.uid))
+
+
+# --- preferences for the time and planner views
+
+def user_prefs(db, uid):
+    out = dict(DEFAULT_PREFS)
+    try:
+        out.update(json.loads(profile_row(db, uid)["prefs"] or "{}"))
+    except ValueError:
+        pass
+    return out
+
+
+@route("GET", "/api/prefs")
+def api_prefs(c):
+    return user_prefs(c.db, c.uid)
+
+
+@route("PUT", "/api/prefs")
+def api_prefs_save(c):
+    p, b = user_prefs(c.db, c.uid), c.body
+    if "work_goal" in b:
+        p["work_goal"] = round(number(b["work_goal"], "Daily work goal", 0, 24), 2)
+    if "week_start" in b:
+        if b["week_start"] not in WEEK_STARTS:
+            raise ApiError(400, "Invalid first day of the week")
+        p["week_start"] = b["week_start"]
+    if "calendar" in b:
+        if b["calendar"] not in ("gregorian", "jalali"):
+            raise ApiError(400, "Invalid calendar")
+        p["calendar"] = b["calendar"]
+    c.db.execute("UPDATE profiles SET prefs=? WHERE user_id=?", (json.dumps(p), c.uid))
+    return p
+
+
+# --- projects
+
+def project_json(r, total=0, open_tasks=0):
+    return {"id": r["id"], "name": r["name"], "color": r["color"], "archived": bool(r["archived"]),
+            "total": total or 0, "open_tasks": open_tasks or 0}
+
+
+def _project_values(db, uid, b, old=None):
+    name = text(b.get("name", old["name"] if old else None), "Project name", 80)
+    color = b.get("color") or (old["color"] if old else None)
+    if color is None:  # the first color no other active project uses
+        used = {r[0] for r in db.execute("SELECT color FROM projects WHERE user_id=? AND archived=0", (uid,))}
+        color = next((x for x in PROJECT_COLORS if x not in used), PROJECT_COLORS[0])
+    if not isinstance(color, str) or not COLOR_RE.match(color):
+        raise ApiError(400, "Invalid color")
+    archived = b["archived"] if "archived" in b else (old["archived"] if old else False)
+    return name, color.lower(), 1 if archived else 0
+
+
+@route("GET", "/api/projects")
+def api_projects(c):
+    totals = sums_by(c.db, "project_id", c.uid)
+    open_tasks = {r[0]: r[1] for r in c.db.execute(
+        "SELECT project_id, COUNT(*) FROM tasks WHERE user_id=? AND done=0 GROUP BY project_id", (c.uid,))}
+    rows = c.db.execute("SELECT * FROM projects WHERE user_id=? ORDER BY archived, name COLLATE NOCASE", (c.uid,))
+    return {"projects": [project_json(r, totals.get(r["id"]), open_tasks.get(r["id"])) for r in rows],
+            "unassigned": totals.get(None, 0)}
+
+
+@route("POST", "/api/projects")
+def api_project_add(c):
+    name, color, archived = _project_values(c.db, c.uid, c.body)
+    cur = c.db.execute("INSERT INTO projects (user_id, name, color, archived, created_at) VALUES (?,?,?,?,?)",
+                       (c.uid, name, color, archived, now_ts()))
+    return project_json(owned(c.db, "projects", c.uid, cur.lastrowid, "Project"))
+
+
+@route("PATCH", r"/api/projects/(\d+)")
+def api_project_edit(c, pid):
+    old = owned(c.db, "projects", c.uid, int(pid), "Project")
+    name, color, archived = _project_values(c.db, c.uid, c.body, old)
+    c.db.execute("UPDATE projects SET name=?, color=?, archived=? WHERE id=?", (name, color, archived, old["id"]))
+    if (name, color) != (old["name"], old["color"]):  # calendar events show the project's name and color
+        c.db.execute("UPDATE plan_blocks SET gcal_dirty=1, updated_at=? WHERE user_id=? AND project_id=?",
+                     (now_ts(), c.uid, old["id"]))
+        kick_google(c)
+    totals = sums_by(c.db, "project_id", c.uid)
+    return project_json(owned(c.db, "projects", c.uid, old["id"], "Project"), totals.get(old["id"]))
+
+
+@route("DELETE", r"/api/projects/(\d+)")
+def api_project_delete(c, pid):
+    p = owned(c.db, "projects", c.uid, int(pid), "Project")
+    # Logged time and planned blocks stay (without a project); the project's to-dos go with it.
+    c.db.execute("UPDATE plan_blocks SET gcal_dirty=1, updated_at=? WHERE user_id=? AND project_id=?",
+                 (now_ts(), c.uid, p["id"]))
+    tasks = c.db.execute("DELETE FROM tasks WHERE user_id=? AND project_id=?", (c.uid, p["id"])).rowcount
+    c.db.execute("DELETE FROM projects WHERE id=?", (p["id"],))
+    kick_google(c)
+    return {"ok": True, "deleted_tasks": tasks}
+
+
+# --- to-dos (tasks). A task can belong to a project, and time can be logged on it.
+
+def task_json(r, total=0):
+    return {"id": r["id"], "project_id": r["project_id"], "title": r["title"], "notes": r["notes"],
+            "due": r["due"], "priority": r["priority"], "done": bool(r["done"]), "done_at": r["done_at"],
+            "created_at": r["created_at"], "total": total or 0}
+
+
+def _task_values(db, uid, b, old=None):
+    def get(key, default=None):
+        return b[key] if key in b else (old[key] if old is not None else default)
+
+    title = text(get("title"), "Title", 200)
+    notes = long_text(get("notes", ""), "Notes", 2000)
+    due = get("due")
+    due = parse_date(due, "due date").isoformat() if due else None
+    priority = int(number(get("priority", 0) or 0, "Priority", 0, 3))
+    project_id = ref_id(get("project_id"), "project")
+    if project_id is not None:
+        owned(db, "projects", uid, project_id, "Project")
+    return {"title": title, "notes": notes, "due": due, "priority": priority, "project_id": project_id}
+
+
+@route("GET", "/api/tasks")
+def api_tasks(c):
+    """Open tasks, plus the ones finished in the last `done_days` days (default 14)."""
+    since = now_ts() - int(number(c.q("done_days", "14"), "done_days", 0, 3650)) * 86400
+    totals = sums_by(c.db, "task_id", c.uid)
+    rows = c.db.execute("SELECT * FROM tasks WHERE user_id=? AND (done=0 OR done_at>=?) "
+                        "ORDER BY done, due IS NULL, due, priority DESC, id", (c.uid, since))
+    return {"tasks": [task_json(r, totals.get(r["id"])) for r in rows]}
+
+
+@route("POST", "/api/tasks")
+def api_task_add(c):
+    v = _task_values(c.db, c.uid, c.body)
+    cur = c.db.execute("INSERT INTO tasks (user_id, project_id, title, notes, due, priority, created_at) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (c.uid, v["project_id"], v["title"], v["notes"], v["due"], v["priority"], now_ts()))
+    return task_json(owned(c.db, "tasks", c.uid, cur.lastrowid, "Task"))
+
+
+@route("PATCH", r"/api/tasks/(\d+)")
+def api_task_edit(c, tid):
+    old = owned(c.db, "tasks", c.uid, int(tid), "Task")
+    v = _task_values(c.db, c.uid, c.body, old)
+    done = bool(c.body["done"]) if "done" in c.body else bool(old["done"])
+    done_at = (old["done_at"] or now_ts()) if done and old["done"] else (now_ts() if done else None)
+    c.db.execute("UPDATE tasks SET project_id=?, title=?, notes=?, due=?, priority=?, done=?, done_at=? WHERE id=?",
+                 (v["project_id"], v["title"], v["notes"], v["due"], v["priority"], int(done), done_at, old["id"]))
+    return task_json(owned(c.db, "tasks", c.uid, old["id"], "Task"), sums_by(c.db, "task_id", c.uid).get(old["id"]))
+
+
+@route("DELETE", r"/api/tasks/(\d+)")
+def api_task_delete(c, tid):
+    owned(c.db, "tasks", c.uid, int(tid), "Task")
+    c.db.execute("DELETE FROM tasks WHERE id=?", (int(tid),))  # logged time stays, without the task
+    return {"ok": True}
+
+
+# --- time entries and the timer
+
+def time_json(r):
+    return {k: r[k] for k in ("id", "project_id", "task_id", "description", "start_ts", "end_ts")}
+
+
+def running_entry(db, uid):
+    r = db.execute("SELECT * FROM time_entries WHERE user_id=? AND end_ts IS NULL ORDER BY start_ts DESC LIMIT 1",
+                   (uid,)).fetchone()
+    return time_json(r) if r else None
+
+
+@route("GET", "/api/time/entries")
+def api_time_entries(c):
+    """Entries that overlap [from, to), newest first, and the running timer."""
+    frm, to = ts_value(c.q("from"), "from"), ts_value(c.q("to"), "to")
+    rows = c.db.execute("SELECT * FROM time_entries WHERE user_id=? AND start_ts < ? AND COALESCE(end_ts, ?) > ? "
+                        "ORDER BY start_ts DESC LIMIT 10000", (c.uid, to, now_ts(), frm))
+    return {"entries": [time_json(r) for r in rows], "running": running_entry(c.db, c.uid), "now": now_ts()}
+
+
+@route("GET", "/api/time/timer")
+def api_timer(c):
+    return {"running": running_entry(c.db, c.uid), "now": now_ts()}
+
+
+@route("POST", "/api/time/timer/start")
+def api_timer_start(c):
+    """Start the timer. A timer that's already running stops first."""
+    b = c.body
+    pid, tid = project_task_refs(c.db, c.uid, ref_id(b.get("project_id"), "project"), ref_id(b.get("task_id"), "task"))
+    desc = text(b.get("description"), "Description", 300, required=False)
+    t = now_ts()
+    c.db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE user_id=? AND end_ts IS NULL", (t, c.uid))
+    c.db.execute("INSERT INTO time_entries (user_id, project_id, task_id, description, start_ts) VALUES (?,?,?,?,?)",
+                 (c.uid, pid, tid, desc, t))
+    return {"running": running_entry(c.db, c.uid), "now": t}
+
+
+@route("POST", "/api/time/timer/stop")
+def api_timer_stop(c):
+    r = running_entry(c.db, c.uid)
+    if not r:
+        return {"stopped": None}
+    c.db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE id=?", (now_ts(), r["id"]))
+    return {"stopped": time_json(owned(c.db, "time_entries", c.uid, r["id"], "Entry"))}
+
+
+def _check_span(start, end, running=False):
+    if running:
+        if start > now_ts() + 60:
+            raise ApiError(400, "A running timer can't start in the future")
+        return
+    if end <= start:
+        raise ApiError(400, "End must be after start")
+    if end - start > MAX_ENTRY_SECONDS:
+        raise ApiError(400, "An entry can be at most 7 days long")
+
+
+@route("POST", "/api/time/entries")
+def api_time_add(c):
+    b = c.body
+    pid, tid = project_task_refs(c.db, c.uid, ref_id(b.get("project_id"), "project"), ref_id(b.get("task_id"), "task"))
+    start, end = ts_value(b.get("start_ts"), "Start"), ts_value(b.get("end_ts"), "End")
+    _check_span(start, end)
+    cur = c.db.execute("INSERT INTO time_entries (user_id, project_id, task_id, description, start_ts, end_ts) "
+                       "VALUES (?,?,?,?,?,?)",
+                       (c.uid, pid, tid, text(b.get("description"), "Description", 300, required=False), start, end))
+    return time_json(owned(c.db, "time_entries", c.uid, cur.lastrowid, "Entry"))
+
+
+@route("PATCH", r"/api/time/entries/(\d+)")
+def api_time_edit(c, eid):
+    e = dict(owned(c.db, "time_entries", c.uid, int(eid), "Entry"))
+    b = c.body
+    if "description" in b:
+        e["description"] = text(b["description"], "Description", 300, required=False)
+    if "project_id" in b or "task_id" in b:
+        e["project_id"], e["task_id"] = project_task_refs(
+            c.db, c.uid, ref_id(b.get("project_id", e["project_id"]), "project"),
+            ref_id(b.get("task_id", e["task_id"]), "task"))
+    if "start_ts" in b:
+        e["start_ts"] = ts_value(b["start_ts"], "Start")
+    if "end_ts" in b and e["end_ts"] is not None:  # a running entry ends by stopping the timer
+        e["end_ts"] = ts_value(b["end_ts"], "End")
+    _check_span(e["start_ts"], e["end_ts"], running=e["end_ts"] is None)
+    c.db.execute("UPDATE time_entries SET project_id=?, task_id=?, description=?, start_ts=?, end_ts=? WHERE id=?",
+                 (e["project_id"], e["task_id"], e["description"], e["start_ts"], e["end_ts"], e["id"]))
+    return time_json(e)
+
+
+@route("DELETE", r"/api/time/entries/(\d+)")
+def api_time_delete(c, eid):
+    owned(c.db, "time_entries", c.uid, int(eid), "Entry")
+    c.db.execute("DELETE FROM time_entries WHERE id=?", (int(eid),))
+    return {"ok": True}
+
+
+# --- planner: time blocks you schedule, mirrored to Google Calendar when connected
+
+def block_json(r, google=False):
+    out = {k: r[k] for k in ("id", "title", "notes", "project_id", "task_id", "start_ts", "end_ts", "series")}
+    if google:
+        out["gcal"] = "error" if r["gcal_error"] else ("pending" if r["gcal_dirty"] else "synced")
+        out["gcal_error"] = r["gcal_error"]
+    return out
+
+
+def has_google(db, uid):
+    return db.execute("SELECT 1 FROM google_accounts WHERE user_id=?", (uid,)).fetchone() is not None
+
+
+def _block_values(db, uid, b, old=None):
+    def get(key, default=None):
+        return b[key] if key in b else (old[key] if old is not None else default)
+
+    title = text(get("title", ""), "Title", 200, required=False)
+    notes = long_text(get("notes", ""), "Notes", 2000)
+    pid, tid = project_task_refs(db, uid, ref_id(get("project_id"), "project"), ref_id(get("task_id"), "task"))
+    start, end = ts_value(get("start_ts"), "Start"), ts_value(get("end_ts"), "End")
+    if end <= start:
+        raise ApiError(400, "End must be after start")
+    if end - start > 86400:
+        raise ApiError(400, "A block can be at most 24 hours long")
+    if not title and pid is None and tid is None:
+        raise ApiError(400, "Give the block a title or pick a project")
+    return {"title": title, "notes": notes, "project_id": pid, "task_id": tid, "start_ts": start, "end_ts": end}
+
+
+@route("GET", "/api/plan")
+def api_plan(c):
+    frm, to = ts_value(c.q("from"), "from"), ts_value(c.q("to"), "to")
+    google = has_google(c.db, c.uid)
+    rows = c.db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND start_ts < ? AND end_ts > ? ORDER BY start_ts",
+                        (c.uid, to, frm))
+    return {"blocks": [block_json(r, google) for r in rows], "google": google}
+
+
+@route("POST", "/api/plan")
+def api_plan_add(c):
+    """Add a block. `repeat_starts` (start times) adds copies of it, for repeating plans."""
+    v = _block_values(c.db, c.uid, c.body)
+    extra = c.body.get("repeat_starts") or []
+    if not isinstance(extra, list) or len(extra) > 100:
+        raise ApiError(400, "Too many repeats (at most 100)")
+    starts = [v["start_ts"]] + [ts_value(s, "Repeat start") for s in extra]
+    series = secrets.token_hex(6) if len(starts) > 1 else None
+    length, t, ids = v["end_ts"] - v["start_ts"], now_ts(), []
+    for s in sorted(set(starts)):
+        cur = c.db.execute("INSERT INTO plan_blocks (user_id, title, notes, project_id, task_id, start_ts, end_ts, "
+                           "series, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                           (c.uid, v["title"], v["notes"], v["project_id"], v["task_id"], s, s + length, series, t))
+        ids.append(cur.lastrowid)
+    kick_google(c)
+    google = has_google(c.db, c.uid)
+    return {"ids": ids, "block": block_json(owned(c.db, "plan_blocks", c.uid, ids[0], "Block"), google)}
+
+
+@route("PATCH", r"/api/plan/(\d+)")
+def api_plan_edit(c, bid):
+    old = owned(c.db, "plan_blocks", c.uid, int(bid), "Block")
+    v = _block_values(c.db, c.uid, c.body, old)
+    c.db.execute("UPDATE plan_blocks SET title=?, notes=?, project_id=?, task_id=?, start_ts=?, end_ts=?, "
+                 "gcal_dirty=1, updated_at=? WHERE id=?",
+                 (v["title"], v["notes"], v["project_id"], v["task_id"], v["start_ts"], v["end_ts"], now_ts(),
+                  old["id"]))
+    kick_google(c)
+    return block_json(owned(c.db, "plan_blocks", c.uid, old["id"], "Block"), has_google(c.db, c.uid))
+
+
+def _delete_blocks(db, uid, rows):
+    for r in rows:
+        if r["gcal_id"]:
+            db.execute("INSERT OR IGNORE INTO gcal_deletes (user_id, cal, event_id) VALUES (?,?,?)",
+                       (uid, r["gcal_cal"], r["gcal_id"]))
+        db.execute("DELETE FROM plan_blocks WHERE id=?", (r["id"],))
+    return len(rows)
+
+
+@route("DELETE", r"/api/plan/(\d+)")
+def api_plan_delete(c, bid):
+    """Delete a block; with ?following=1 also the later blocks of the same repeating series."""
+    b = owned(c.db, "plan_blocks", c.uid, int(bid), "Block")
+    rows = [b]
+    if c.q("following") == "1" and b["series"]:
+        rows = c.db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND series=? AND start_ts>=?",
+                            (c.uid, b["series"], b["start_ts"])).fetchall()
+    n = _delete_blocks(c.db, c.uid, rows)
+    kick_google(c)
+    return {"ok": True, "deleted": n}
+
+
+# ---------------------------------------------------------------- Google Calendar
+#
+# Planned blocks are pushed to one calendar the user picks (in the background, retried until they get through).
+# Events from the calendars they show in Google appear read-only in the planner, and moving or deleting one of
+# our events in Google changes the block here too.
+
+GSYNC = None  # GoogleSync worker, started in main() when Google is configured
+# Google's event colors, to show each block in its project's color.
+GCAL_COLORS = {"1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73", "5": "#f6bf26", "6": "#f4511e",
+               "7": "#039be5", "8": "#616161", "9": "#3f51b5", "10": "#0b8043", "11": "#d50000"}
+_calendar_cache = {}  # uid -> (expires, calendars)
+_cache_lock = threading.Lock()
+
+
+class GoogleError(Exception):
+    def __init__(self, status, message, reauth=False):
+        super().__init__(message)
+        self.status, self.message, self.reauth = status, message, reauth
+
+
+def google_http(method, url, token=None, body=None, form=None, params=None, timeout=20):
+    if params:
+        url += ("&" if "?" in url else "?") + urlencode(params)
+    headers, data = {"Accept": "application/json"}, None
+    if form is not None:
+        data = urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read()
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        e.close()
+        msg, reauth = f"Google answered {e.code}", e.code == 401
+        try:
+            j = json.loads(raw)
+            err = j.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or msg
+            elif isinstance(err, str):
+                msg = j.get("error_description") or err
+                reauth = reauth or err in ("invalid_grant", "unauthorized_client")
+        except ValueError:
+            pass
+        raise GoogleError(e.code, msg, reauth)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise GoogleError(0, f"Can't reach Google ({getattr(e, 'reason', e)})")
+
+
+def public_base(handler):
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    host = handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or f"localhost:{PORT}"
+    proto = handler.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = "https" if COOKIE_SECURE == "1" else "http"
+    return f"{proto}://{host.split(',')[0].strip()}"
+
+
+def google_account(db, uid):
+    return db.execute("SELECT * FROM google_accounts WHERE user_id=?", (uid,)).fetchone()
+
+
+def google_token(db, uid, force=False):
+    """A valid access token, refreshed when needed. Commits the new token."""
+    acc = google_account(db, uid)
+    if not acc:
+        raise GoogleError(0, "Google Calendar isn't connected")
+    if acc["needs_reauth"]:
+        raise GoogleError(401, "Google access ended. Connect Google Calendar again in Settings.", True)
+    if not force and acc["access_token"] and acc["access_expires"] > now_ts() + 60:
+        return acc["access_token"]
+    try:
+        data = google_http("POST", GOOGLE_TOKEN_URL, form={
+            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "refresh_token": acc["refresh_token"], "grant_type": "refresh_token"})
+    except GoogleError as e:
+        if e.reauth or e.status in (400, 401):
+            db.execute("UPDATE google_accounts SET needs_reauth=1, access_token=NULL, last_error=? WHERE user_id=?",
+                       ("Google access ended. Connect Google Calendar again in Settings.", uid))
+            db.commit()
+            raise GoogleError(401, "Google access ended. Connect Google Calendar again in Settings.", True)
+        raise
+    db.execute("UPDATE google_accounts SET access_token=?, access_expires=? WHERE user_id=?",
+               (data["access_token"], now_ts() + int(data.get("expires_in", 3600)), uid))
+    db.commit()
+    return data["access_token"]
+
+
+def gcal(db, uid, method, path, **kw):
+    """Call the Calendar API as this user; retries once with a fresh token if Google rejects the old one."""
+    token = google_token(db, uid)
+    try:
+        return google_http(method, GOOGLE_API + path, token=token, **kw)
+    except GoogleError as e:
+        if e.status != 401:
+            raise
+    return google_http(method, GOOGLE_API + path, token=google_token(db, uid, force=True), **kw)
+
+
+def rfc3339(ts):
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_rfc3339(s):
+    return int(dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+
+
+def nearest_gcal_color(hex_color):
+    def rgb(h):
+        return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+    r, g, b = rgb(hex_color)
+    return min(GCAL_COLORS, key=lambda k: sum((x - y) ** 2 for x, y in zip((r, g, b), rgb(GCAL_COLORS[k]))))
+
+
+def block_summary(db, r):
+    if r["title"]:
+        return r["title"]
+    if r["task_id"]:
+        t = db.execute("SELECT title FROM tasks WHERE id=?", (r["task_id"],)).fetchone()
+        if t:
+            return t["title"]
+    if r["project_id"]:
+        p = db.execute("SELECT name FROM projects WHERE id=?", (r["project_id"],)).fetchone()
+        if p:
+            return p["name"]
+    return "Focus time"
+
+
+def block_event(db, uid, r):
+    p = db.execute("SELECT name, color FROM projects WHERE id=?", (r["project_id"],)).fetchone() \
+        if r["project_id"] else None
+    t = db.execute("SELECT title FROM tasks WHERE id=?", (r["task_id"],)).fetchone() if r["task_id"] else None
+    lines = [r["notes"]] if r["notes"] else []
+    if p:
+        lines.append(f"Project: {p['name']}" + (f" › {t['title']}" if t else ""))
+    elif t:
+        lines.append(f"Task: {t['title']}")
+    ev = {"summary": block_summary(db, r), "description": "\n".join(lines),
+          "start": {"dateTime": rfc3339(r["start_ts"])}, "end": {"dateTime": rfc3339(r["end_ts"])},
+          "extendedProperties": {"private": {"ctBlock": str(r["id"]), "ctUser": str(uid)}}}
+    if p:
+        ev["colorId"] = nearest_gcal_color(p["color"])
+    return ev
+
+
+def gcal_sync_user(uid):
+    """Push this user's pending deletes and changed blocks to Google. Returns how many blocks were pushed."""
+    if GSYNC is None:
+        return 0
+    with GSYNC.user_lock(uid):
+        db = connect()
+        try:
+            return _gcal_push(db, uid)
+        except GoogleError as e:
+            if google_account(db, uid):
+                db.execute("UPDATE google_accounts SET last_error=? WHERE user_id=?", (e.message, uid))
+                db.commit()
+            raise
+        finally:
+            db.close()
+
+
+def _gcal_push(db, uid):
+    acc = google_account(db, uid)
+    if not acc:
+        return 0
+    if acc["needs_reauth"]:
+        raise GoogleError(401, "Google access ended. Connect Google Calendar again in Settings.", True)
+    cal = acc["calendar_id"]
+    _gcal_deletes(db, uid)
+    pushed = 0
+    since = now_ts() - 30 * 86400  # older plans aren't worth sending
+    for r in db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND gcal_dirty=1 AND end_ts>? ORDER BY start_ts",
+                        (uid, since)).fetchall():
+        body = block_event(db, uid, r)
+        cal_q = quote(cal, safe="")
+        ev = None
+        try:
+            if r["gcal_id"] and r["gcal_cal"] == cal:
+                try:
+                    ev = gcal(db, uid, "PUT", f"/calendars/{cal_q}/events/{quote(r['gcal_id'], safe='')}", body=body)
+                except GoogleError as e:
+                    if e.status not in (404, 410):
+                        raise
+            elif r["gcal_id"]:  # the target calendar changed: delete the copy in the old one
+                db.execute("INSERT OR IGNORE INTO gcal_deletes (user_id, cal, event_id) VALUES (?,?,?)",
+                           (uid, r["gcal_cal"], r["gcal_id"]))
+                db.execute("UPDATE plan_blocks SET gcal_id=NULL, gcal_cal=NULL WHERE id=?", (r["id"],))
+                db.commit()
+            if ev is None:
+                ev = gcal(db, uid, "POST", f"/calendars/{cal_q}/events", body=body)
+        except GoogleError as e:
+            if e.status in (0, 401) or e.status >= 500:  # Google is unreachable or access is gone: try later
+                raise
+            db.execute("UPDATE plan_blocks SET gcal_error=? WHERE id=?", (e.message[:300], r["id"]))
+            db.commit()
+            continue
+        cur = db.execute("UPDATE plan_blocks SET gcal_id=?, gcal_cal=?, gcal_pushed=?, gcal_error=NULL WHERE id=?",
+                         (ev["id"], cal, ev.get("updated"), r["id"]))
+        if not cur.rowcount:  # deleted while we were sending it
+            db.execute("INSERT OR IGNORE INTO gcal_deletes (user_id, cal, event_id) VALUES (?,?,?)", (uid, cal, ev["id"]))
+        db.execute("UPDATE plan_blocks SET gcal_dirty=0 WHERE id=? AND updated_at=?", (r["id"], r["updated_at"]))
+        db.commit()
+        pushed += 1
+    _gcal_deletes(db, uid)  # the ones queued while pushing (moved or vanished blocks)
+    db.execute("UPDATE google_accounts SET last_sync=?, last_error=NULL WHERE user_id=?", (now_ts(), uid))
+    db.commit()
+    return pushed
+
+
+def _gcal_deletes(db, uid):
+    for d in db.execute("SELECT cal, event_id FROM gcal_deletes WHERE user_id=?", (uid,)).fetchall():
+        try:
+            gcal(db, uid, "DELETE", f"/calendars/{quote(d['cal'], safe='')}/events/{quote(d['event_id'], safe='')}")
+        except GoogleError as e:
+            if e.status not in (404, 410):  # already gone is fine
+                raise
+        db.execute("DELETE FROM gcal_deletes WHERE user_id=? AND cal=? AND event_id=?", (uid, d["cal"], d["event_id"]))
+        db.commit()
+
+
+class GoogleSync:
+    """Background worker: pushes changes soon after they happen and retries failures every few minutes."""
+
+    def __init__(self):
+        self.wake = threading.Event()
+        self.lock = threading.Lock()
+        self.pending = set()
+        self.locks = {}
+
+    def user_lock(self, uid):
+        with self.lock:
+            return self.locks.setdefault(uid, threading.Lock())
+
+    def kick(self, uid):
+        with self.lock:
+            self.pending.add(uid)
+        self.wake.set()
+
+    def start(self):
+        threading.Thread(target=self.run, daemon=True, name="google-sync").start()
+        return self
+
+    def run(self):
+        while True:
+            self.wake.wait(timeout=300)
+            self.wake.clear()
+            time.sleep(1)  # let a burst of edits settle
+            with self.lock:
+                users, self.pending = self.pending, set()
+            if not users:
+                db = connect()
+                try:
+                    users = {r[0] for r in db.execute(
+                        "SELECT a.user_id FROM google_accounts a WHERE a.needs_reauth=0 AND ("
+                        "EXISTS (SELECT 1 FROM plan_blocks b WHERE b.user_id=a.user_id AND b.gcal_dirty=1 "
+                        "AND b.end_ts>?) OR EXISTS (SELECT 1 FROM gcal_deletes d WHERE d.user_id=a.user_id))",
+                        (now_ts() - 30 * 86400,))}
+                finally:
+                    db.close()
+            for uid in users:
+                try:
+                    gcal_sync_user(uid)
+                except GoogleError as e:
+                    sys.stderr.write(f"google sync for user {uid}: {e.message}\n")
+                except Exception:
+                    traceback.print_exc()
+
+
+def google_calendars(db, uid, fresh=False):
+    with _cache_lock:
+        hit = _calendar_cache.get(uid)
+    if hit and hit[0] > time.time() and not fresh:
+        return hit[1]
+    items = gcal(db, uid, "GET", "/users/me/calendarList", params={"maxResults": 250}).get("items", [])
+    cals = [{"id": x["id"], "name": x.get("summaryOverride") or x.get("summary") or x["id"],
+             "color": x.get("backgroundColor") or "#888888", "primary": bool(x.get("primary")),
+             "shown": bool(x.get("selected")), "writable": x.get("accessRole") in ("owner", "writer")}
+            for x in items if not x.get("deleted")]
+    with _cache_lock:
+        _calendar_cache[uid] = (time.time() + 600, cals)
+    return cals
+
+
+def google_status(db, uid, handler):
+    acc = google_account(db, uid)
+    out = {"available": bool(GOOGLE_CLIENT_ID), "connected": bool(acc),
+           "redirect_uri": public_base(handler) + "/api/google/callback"}
+    if acc:
+        out.update(email=acc["email"], calendar_id=acc["calendar_id"], show_events=bool(acc["show_events"]),
+                   last_sync=acc["last_sync"], last_error=acc["last_error"], needs_reauth=bool(acc["needs_reauth"]),
+                   pending=db.execute("SELECT COUNT(*) FROM plan_blocks WHERE user_id=? AND gcal_dirty=1 AND end_ts>?",
+                                      (uid, now_ts() - 30 * 86400)).fetchone()[0])
+    return out
+
+
+@route("GET", "/api/google")
+def api_google(c):
+    return google_status(c.db, c.uid, c.handler)
+
+
+@route("GET", "/api/google/calendars")
+def api_google_calendars(c):
+    try:
+        return {"calendars": google_calendars(c.db, c.uid, fresh=c.q("fresh") == "1")}
+    except GoogleError as e:
+        raise ApiError(502 if e.status != 401 else 400, e.message)
+
+
+@route("POST", "/api/google/connect")
+def api_google_connect(c):
+    """Start connecting: returns the Google page to open (in the browser, also from the Android app)."""
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
+        raise ApiError(400, "Google Calendar isn't set up on this server yet (GOOGLE_CLIENT_ID, see README).")
+    state = secrets.token_urlsafe(24)
+    redirect = public_base(c.handler) + "/api/google/callback"
+    c.db.execute("DELETE FROM oauth_states WHERE expires < ?", (now_ts(),))
+    c.db.execute("INSERT INTO oauth_states (state, user_id, redirect_uri, expires) VALUES (?,?,?,?)",
+                 (state, c.uid, redirect, now_ts() + 900))
+    return {"url": GOOGLE_AUTH_URL + "?" + urlencode({
+        "client_id": GOOGLE_CLIENT_ID, "redirect_uri": redirect, "response_type": "code", "scope": GOOGLE_SCOPES,
+        "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true", "state": state})}
+
+
+def _result_page(title, message, ok):
+    color = "#1baf7a" if ok else "#d03b3b"
+    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{html_escape(title)}</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;
+background:#f4f4f1;color:#0b0b0b}}main{{max-width:420px;padding:24px;text-align:center}}
+h1{{font-size:20px;color:{color}}}a{{color:#2a78d6}}</style></head>
+<body><main><h1>{html_escape(title)}</h1><p>{html_escape(message)}</p>
+<p><a href="/#settings">Open the web app</a> · or switch back to the Android app.</p></main></body></html>"""
+    return RawResponse(page.encode("utf-8"), "text/html; charset=utf-8")
+
+
+@route("GET", "/api/google/callback", auth=False)
+def api_google_callback(c):
+    state = c.q("state") or ""
+    row = c.db.execute("SELECT * FROM oauth_states WHERE state=?", (state,)).fetchone()
+    c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+    if not row or row["expires"] < now_ts():
+        return _result_page("Link expired", "Start connecting again from Settings.", False)
+    if c.q("error"):
+        return _result_page("Not connected", f"Google said: {c.q('error')}.", False)
+    uid = row["user_id"]
+    try:
+        tok = google_http("POST", GOOGLE_TOKEN_URL, form={
+            "code": c.q("code") or "", "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": row["redirect_uri"], "grant_type": "authorization_code"})
+        if not tok.get("refresh_token"):
+            return _result_page("Not connected", "Google didn't grant offline access. Please try again.", False)
+        primary = google_http("GET", GOOGLE_API + "/calendars/primary", token=tok["access_token"])
+    except GoogleError as e:
+        return _result_page("Not connected", e.message, False)
+    old = google_account(c.db, uid)
+    calendar_id = old["calendar_id"] if old and old["email"] == primary.get("id") else primary.get("id", "primary")
+    c.db.execute("INSERT OR REPLACE INTO google_accounts (user_id, refresh_token, access_token, access_expires, email, "
+                 "calendar_id, show_events, connected_at) VALUES (?,?,?,?,?,?,?,?)",
+                 (uid, tok["refresh_token"], tok["access_token"], now_ts() + int(tok.get("expires_in", 3600)),
+                  primary.get("id"), calendar_id, old["show_events"] if old else 1, now_ts()))
+    c.db.execute("UPDATE plan_blocks SET gcal_dirty=1 WHERE user_id=? AND end_ts>?", (uid, now_ts() - 30 * 86400))
+    with _cache_lock:
+        _calendar_cache.pop(uid, None)
+    c.after.append(lambda: GSYNC and GSYNC.kick(uid))
+    return _result_page("Google Calendar connected",
+                        f"Signed in as {primary.get('id', '')}. Your planned blocks will show up in your calendar.",
+                        True)
+
+
+@route("PUT", "/api/google")
+def api_google_save(c):
+    acc = google_account(c.db, c.uid)
+    if not acc:
+        raise ApiError(400, "Google Calendar isn't connected")
+    if "show_events" in c.body:
+        c.db.execute("UPDATE google_accounts SET show_events=? WHERE user_id=?",
+                     (1 if c.body["show_events"] else 0, c.uid))
+    cal = c.body.get("calendar_id")
+    if cal and cal != acc["calendar_id"]:
+        try:
+            ok = any(x["id"] == cal and x["writable"] for x in google_calendars(c.db, c.uid, fresh=True))
+        except GoogleError as e:
+            raise ApiError(502, e.message)
+        if not ok:
+            raise ApiError(400, "You can't add events to that calendar")
+        c.db.execute("UPDATE google_accounts SET calendar_id=? WHERE user_id=?", (cal, c.uid))
+        c.db.execute("UPDATE plan_blocks SET gcal_dirty=1 WHERE user_id=? AND gcal_id IS NOT NULL", (c.uid,))
+        kick_google(c)
+    return google_status(c.db, c.uid, c.handler)
+
+
+@route("POST", "/api/google/sync")
+def api_google_sync(c):
+    """Push everything now and report back."""
+    c.db.commit()  # the worker uses its own connection
+    try:
+        pushed = gcal_sync_user(c.uid)
+    except GoogleError as e:
+        raise ApiError(502 if e.status != 401 else 400, e.message)
+    return {"pushed": pushed, **google_status(c.db, c.uid, c.handler)}
+
+
+@route("DELETE", "/api/google")
+def api_google_disconnect(c):
+    """Forget the Google login. Events already in Google stay there."""
+    acc = google_account(c.db, c.uid)
+    if acc:
+        try:
+            google_http("POST", GOOGLE_REVOKE_URL, form={"token": acc["refresh_token"]}, timeout=8)
+        except GoogleError:
+            pass  # forgetting it here is what matters
+        c.db.execute("DELETE FROM google_accounts WHERE user_id=?", (c.uid,))
+        c.db.execute("DELETE FROM gcal_deletes WHERE user_id=?", (c.uid,))
+        with _cache_lock:
+            _calendar_cache.pop(c.uid, None)
+    return {"ok": True}
+
+
+@route("GET", "/api/google/events")
+def api_google_events(c):
+    """Events from the user's shown Google calendars in [from, to). Also applies changes made in Google
+    to our own events (moved, renamed or deleted there) to the matching blocks."""
+    frm, to = ts_value(c.q("from"), "from"), ts_value(c.q("to"), "to")
+    acc = google_account(c.db, c.uid)
+    if not acc or acc["needs_reauth"]:
+        return {"connected": bool(acc), "events": [], "changed": 0,
+                "error": acc and "Google access ended. Connect again in Settings."}
+    try:
+        cals = google_calendars(c.db, c.uid)
+        wanted = [x for x in cals if (x["shown"] and acc["show_events"]) or x["id"] == acc["calendar_id"]]
+        events, changed = [], 0
+        for cal in wanted:
+            mine = cal["id"] == acc["calendar_id"]
+            params = {"timeMin": rfc3339(frm), "timeMax": rfc3339(to), "singleEvents": "true", "maxResults": 250,
+                      "orderBy": "startTime"}
+            if mine:
+                params["showDeleted"] = "true"
+            items = gcal(c.db, c.uid, "GET", f"/calendars/{quote(cal['id'], safe='')}/events", params=params)
+            for ev in items.get("items", []):
+                priv = (ev.get("extendedProperties") or {}).get("private") or {}
+                if priv.get("ctUser") == str(c.uid) and priv.get("ctBlock"):
+                    if mine:
+                        changed += _apply_google_change(c.db, c.uid, ev, priv["ctBlock"])
+                    continue
+                if ev.get("status") == "cancelled" or not (cal["shown"] and acc["show_events"]):
+                    continue
+                start, end = ev.get("start") or {}, ev.get("end") or {}
+                item = {"id": ev.get("id"), "title": ev.get("summary") or "(busy)", "calendar": cal["name"],
+                        "color": cal["color"], "link": ev.get("htmlLink")}
+                if "date" in start:
+                    item.update(all_day=True, start_date=start["date"], end_date=end.get("date", start["date"]))
+                elif "dateTime" in start and "dateTime" in end:
+                    item.update(all_day=False, start_ts=parse_rfc3339(start["dateTime"]),
+                                end_ts=parse_rfc3339(end["dateTime"]))
+                else:
+                    continue
+                events.append(item)
+    except GoogleError as e:
+        return {"connected": True, "events": [], "changed": 0, "error": e.message}
+    return {"connected": True, "events": events, "changed": changed, "error": None}
+
+
+def _apply_google_change(db, uid, ev, block_id):
+    try:
+        b = db.execute("SELECT * FROM plan_blocks WHERE id=? AND user_id=?", (int(block_id), uid)).fetchone()
+    except ValueError:
+        return 0
+    if not b or b["gcal_id"] != ev.get("id") or b["gcal_dirty"]:
+        return 0  # not ours anymore, or our own newer change is about to be sent
+    if ev.get("updated") and b["gcal_pushed"] and ev["updated"] <= b["gcal_pushed"]:
+        return 0
+    if ev.get("status") == "cancelled":
+        db.execute("DELETE FROM plan_blocks WHERE id=?", (b["id"],))
+        return 1
+    start, end = (ev.get("start") or {}).get("dateTime"), (ev.get("end") or {}).get("dateTime")
+    if not (start and end):
+        return 0  # turned into an all-day event; leave the block as it is
+    new = {"start_ts": parse_rfc3339(start), "end_ts": parse_rfc3339(end)}
+    summary = ev.get("summary") or ""
+    title = b["title"] if summary == block_summary(db, b) else summary[:200]
+    if (new["start_ts"], new["end_ts"], title) == (b["start_ts"], b["end_ts"], b["title"]):
+        db.execute("UPDATE plan_blocks SET gcal_pushed=? WHERE id=?", (ev.get("updated"), b["id"]))
+        return 0
+    db.execute("UPDATE plan_blocks SET start_ts=?, end_ts=?, title=?, gcal_pushed=?, updated_at=? "
+               "WHERE id=? AND gcal_dirty=0",
+               (new["start_ts"], new["end_ts"], title, ev.get("updated"), now_ts(), b["id"]))
+    return 1
+
+
+# ---------------------------------------------------------------- calendar feed (ICS)
+#
+# A secret link any calendar app can subscribe to: your planned blocks and dated to-dos. Read-only and
+# refreshed on the calendar app's schedule (Google: every few hours), so the Google connection is quicker.
+
+def ics_token(db, uid, reset=False):
+    p = profile_row(db, uid)
+    if p["ics_token"] and not reset:
+        return p["ics_token"]
+    token = secrets.token_urlsafe(24)
+    db.execute("UPDATE profiles SET ics_token=? WHERE user_id=?", (token, uid))
+    return token
+
+
+@route("GET", "/api/ics")
+def api_ics(c):
+    return {"url": f"{public_base(c.handler)}/cal/{ics_token(c.db, c.uid)}.ics"}
+
+
+@route("POST", "/api/ics/reset")
+def api_ics_reset(c):
+    return {"url": f"{public_base(c.handler)}/cal/{ics_token(c.db, c.uid, reset=True)}.ics"}
+
+
+def _ics_text(s):
+    return str(s).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\r", "").replace("\n", "\\n")
+
+
+def _ics_fold(line):
+    """Lines longer than 75 bytes continue on the next line after a space (RFC 5545)."""
+    raw, out, cur = line.encode("utf-8"), [], b""
+    for ch in line:
+        b = ch.encode("utf-8")
+        if len(cur) + len(b) > (75 if not out else 74):
+            out.append(cur)
+            cur = b""
+        cur += b
+    out.append(cur)
+    return b"\r\n ".join(out).decode("utf-8") if len(raw) > 75 else line
+
+
+def build_ics(db, uid):
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fmt_ts = lambda ts: dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: E731
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Daybook//Planner//EN", "CALSCALE:GREGORIAN",
+             "X-WR-CALNAME:Planner", "REFRESH-INTERVAL;VALUE=DURATION:PT1H", "X-PUBLISHED-TTL:PT1H"]
+    t = now_ts()
+    for r in db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND end_ts>? AND start_ts<? ORDER BY start_ts",
+                        (uid, t - 60 * 86400, t + 400 * 86400)).fetchall():
+        lines += ["BEGIN:VEVENT", f"UID:block-{r['id']}@daybook", f"DTSTAMP:{stamp}",
+                  f"DTSTART:{fmt_ts(r['start_ts'])}", f"DTEND:{fmt_ts(r['end_ts'])}",
+                  f"SUMMARY:{_ics_text(block_summary(db, r))}"]
+        if r["notes"]:
+            lines.append(f"DESCRIPTION:{_ics_text(r['notes'])}")
+        lines.append("END:VEVENT")
+    for r in db.execute("SELECT * FROM tasks WHERE user_id=? AND done=0 AND due IS NOT NULL", (uid,)).fetchall():
+        d = dt.date.fromisoformat(r["due"])
+        lines += ["BEGIN:VEVENT", f"UID:task-{r['id']}@daybook", f"DTSTAMP:{stamp}",
+                  f"DTSTART;VALUE=DATE:{d.strftime('%Y%m%d')}",
+                  f"DTEND;VALUE=DATE:{(d + dt.timedelta(days=1)).strftime('%Y%m%d')}",
+                  f"SUMMARY:{_ics_text('☐ ' + r['title'])}", "TRANSP:TRANSPARENT", "END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return ("\r\n".join(_ics_fold(x) for x in lines) + "\r\n").encode("utf-8")
+
+
+# ---------------------------------------------------------------- import from Sakura Log
+
+def import_sakura(db, uid, path):
+    """Copy projects, tasks and time entries from a Sakura Log database (logger.db) or its JSON backup.
+    Safe to run twice: things already here are skipped."""
+    if path.endswith(".json"):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    else:
+        src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        src.row_factory = sqlite3.Row
+        data = {k: [dict(r) for r in src.execute(f"SELECT * FROM {k}")] for k in ("projects", "tasks", "entries")}
+        src.close()
+    counts = {"projects": 0, "tasks": 0, "entries": 0, "skipped": 0}
+    pmap, tmap = {}, {}
+    for p in data.get("projects", []):
+        row = db.execute("SELECT id FROM projects WHERE user_id=? AND name=? COLLATE NOCASE",
+                         (uid, p["name"])).fetchone()
+        if row:
+            pmap[p["id"]] = row["id"]
+            continue
+        color = p.get("color") if COLOR_RE.match(str(p.get("color") or "")) else PROJECT_COLORS[0]
+        pmap[p["id"]] = db.execute("INSERT INTO projects (user_id, name, color, archived, created_at) "
+                                   "VALUES (?,?,?,?,?)", (uid, p["name"][:80], color.lower(), int(bool(p.get("archived"))),
+                                                          p.get("created_at") or now_ts())).lastrowid
+        counts["projects"] += 1
+    for t in data.get("tasks", []):
+        pid = pmap.get(t.get("project_id"))
+        row = db.execute("SELECT id FROM tasks WHERE user_id=? AND title=? AND project_id IS ?",
+                         (uid, t["name"], pid)).fetchone()
+        if row:
+            tmap[t["id"]] = row["id"]
+            continue
+        created = t.get("created_at") or now_ts()
+        tmap[t["id"]] = db.execute("INSERT INTO tasks (user_id, project_id, title, done, done_at, created_at) "
+                                   "VALUES (?,?,?,?,?,?)", (uid, pid, t["name"][:200], int(bool(t.get("done"))),
+                                                            created if t.get("done") else None, created)).lastrowid
+        counts["tasks"] += 1
+    running = running_entry(db, uid)
+    for e in data.get("entries", []):
+        start, end = e.get("start_ts"), e.get("end_ts")
+        if end is None and running:
+            end = max(start + 1, now_ts())  # only one timer can run
+        if db.execute("SELECT 1 FROM time_entries WHERE user_id=? AND start_ts=? AND end_ts IS ? AND description=?",
+                      (uid, start, end, e.get("description") or "")).fetchone():
+            counts["skipped"] += 1
+            continue
+        db.execute("INSERT INTO time_entries (user_id, project_id, task_id, description, start_ts, end_ts) "
+                   "VALUES (?,?,?,?,?,?)", (uid, pmap.get(e.get("project_id")), tmap.get(e.get("task_id")),
+                                            e.get("description") or "", start, end))
+        if end is None:
+            running = True
+        counts["entries"] += 1
+    return counts
 
 
 # ---------------------------------------------------------------- HTTP handler
@@ -1215,7 +2445,7 @@ CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CalorieTracker"
+    server_version = "Daybook"
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
@@ -1319,6 +2549,8 @@ class Handler(BaseHTTPRequestHandler):
         if not url.path.startswith("/api/"):
             if method != "GET":
                 return self.send_json(405, {"error": "Method not allowed"})
+            if url.path.startswith("/cal/"):
+                return self.serve_ics(url.path)
             return self.serve_static(url.path)
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1352,8 +2584,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(400, {"error": "Invalid JSON"})
                 if not isinstance(body, dict):
                     return self.send_json(400, {"error": "Expected a JSON object"})
-            result = fn(Ctx(self, db, uid, body, parse_qs(url.query)), *match.groups())
+            ctx = Ctx(self, db, uid, body, parse_qs(url.query))
+            result = fn(ctx, *match.groups())
             db.commit()
+            for hook in ctx.after:
+                try:
+                    hook()
+                except Exception:  # a failed side job must not fail the request
+                    traceback.print_exc()
             if isinstance(result, RawResponse):
                 return self.send(200, result.data, result.ctype, {"Cache-Control": "no-store", **result.headers})
             return self.send_json(200, result)
@@ -1363,11 +2601,24 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # keep the server alive, log the bug
             db.rollback()
             self.log_error("error on %s %s: %r", method, url.path, e)
-            import traceback
             traceback.print_exc()
             return self.send_json(500, {"error": "Server error"})
         finally:
             db.close()
+
+    def serve_ics(self, path):
+        m = re.fullmatch(r"/cal/([\w-]{20,64})\.ics", path)
+        if not m:
+            return self.send(404, b"Not found", "text/plain; charset=utf-8")
+        db = connect()
+        try:
+            row = db.execute("SELECT user_id FROM profiles WHERE ics_token=?", (m.group(1),)).fetchone()
+            data = build_ics(db, row["user_id"]) if row else None
+        finally:
+            db.close()
+        if data is None:
+            return self.send(404, b"Not found", "text/plain; charset=utf-8")
+        self.send(200, data, "text/calendar; charset=utf-8", {"Cache-Control": "no-cache"})
 
     def serve_static(self, path):
         if path in ("/", "/index.html"):
@@ -1422,6 +2673,16 @@ def cli(argv):
         elif cmd == "users":
             for r in db.execute("SELECT username, created_at FROM users ORDER BY id"):
                 print(r["username"], r["created_at"])
+        elif cmd == "import-sakura" and len(argv) == 3:
+            row = db.execute("SELECT id FROM users WHERE username=?", (argv[2],)).fetchone()
+            if not row:
+                sys.exit("No such user")
+            if not os.path.isfile(argv[1]):
+                sys.exit(f"Not found: {argv[1]}")
+            n = import_sakura(db, row["id"], argv[1])
+            db.commit()
+            print(f"Imported {n['projects']} projects, {n['tasks']} tasks and {n['entries']} time entries "
+                  f"for {argv[2]} ({n['skipped']} entries were already here).")
         else:
             sys.exit(__doc__)
     except ApiError as e:
@@ -1434,9 +2695,14 @@ def main():
     if len(sys.argv) > 1:
         return cli(sys.argv[1:])
     init_db()
+    global GSYNC
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+        GSYNC = GoogleSync().start()
+        GSYNC.wake.set()  # catch up on changes made while the server was down
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
-    print(f"Calorie tracker running on http://{HOST}:{PORT}  (data: {db_path()})")
+    print(f"Daybook running on http://{HOST}:{PORT}  (data: {db_path()})"
+          + ("  · Google Calendar on" if GSYNC else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
