@@ -559,3 +559,15 @@ body.has-timer .toast { bottom: calc(134px + env(safe-area-inset-bottom)); }
 }
 #todo-groups { display: flex; flex-direction: column; gap: 12px; }
 #google-body p { margin: 0; }
+
+/* ---------- Telegram settings and reminders */
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.wide { width: 100%; justify-content: center; }
+.steps { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.tg-more summary { cursor: pointer; color: var(--accent); font-size: 14px; }
+.tg-more[open] summary { margin-bottom: 12px; }
+.check-time { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.check-time label.check { flex: 1 1 auto; }
+.check-time input[type="time"] { width: 150px; min-height: 36px; }
+.todo-sub .remind { color: var(--accent); }

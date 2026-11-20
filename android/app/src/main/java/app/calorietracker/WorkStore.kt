@@ -24,6 +24,7 @@ import app.calorietracker.data.ProjectsReply
 import app.calorietracker.data.StopReply
 import app.calorietracker.data.TaskItem
 import app.calorietracker.data.TasksReply
+import app.calorietracker.data.TelegramStatus
 import app.calorietracker.data.TimeEntry
 import app.calorietracker.data.TimerReply
 import app.calorietracker.data.UrlReply
@@ -107,6 +108,8 @@ class WorkStore(
         private set
     var icsUrl by mutableStateOf<String?>(null)
         private set
+    var telegram by mutableStateOf<TelegramStatus?>(null)
+        private set
 
     fun now(): Long = System.currentTimeMillis() / 1000 + skew
     fun project(id: Long?): Project? = if (id == null) null else projects.firstOrNull { it.id == id }
@@ -150,6 +153,7 @@ class WorkStore(
     }
 
     fun reset() {
+        telegram = null
         projects = emptyList()
         tasks = emptyList()
         running = null
@@ -439,6 +443,42 @@ class WorkStore(
     }
 
     fun loadIcs() = launchSafe { icsUrl = api.get<UrlReply>("/api/ics").url }
+
+    // ------------------------------------------------------------ Telegram reminders
+
+    /** [quiet]: don't show errors (for the hint in the to-do sheet). */
+    suspend fun loadTelegram(quiet: Boolean = false) {
+        try {
+            telegram = api.get("/api/telegram")
+        } catch (e: ApiException) {
+            if (!quiet || e.status == 401) onError(e)
+        }
+    }
+
+    /** Save the bot token and proxy (the server checks them with Telegram). Returns an error message, or null. */
+    suspend fun saveTelegramBot(body: JsonObject): String? = try {
+        telegram = api.put("/api/telegram/bot", body)
+        null
+    } catch (e: ApiException) {
+        if (e.status == 401) onError(e)
+        e.message ?: "Couldn't save"
+    }
+
+    suspend fun saveTelegram(body: JsonObject): Boolean = act {
+        telegram = api.put("/api/telegram", body)
+        toast("Saved")
+    }
+
+    fun testTelegram() = launchSafe {
+        telegram = api.post("/api/telegram/test")
+        toast("Sent. Check Telegram.")
+    }
+
+    fun disconnectTelegram() = launchSafe {
+        api.delete<OkReply>("/api/telegram")
+        toast("Disconnected")
+        telegram = api.get("/api/telegram")
+    }
 
     fun resetIcs() = launchSafe {
         icsUrl = api.post<UrlReply>("/api/ics/reset").url

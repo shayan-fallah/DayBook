@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -29,16 +31,21 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import app.calorietracker.AppViewModel
+import app.calorietracker.data.TelegramStatus
 import app.calorietracker.data.jsonBody
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** Settings for time tracking and the planner: work goal, calendar, Google Calendar and the calendar feed. */
+/** Settings for time tracking and the planner: work goal, calendar, Telegram, Google Calendar and the calendar feed. */
 @Composable
 fun WorkSettingsCards(vm: AppViewModel) {
     val work = vm.work
@@ -46,8 +53,10 @@ fun WorkSettingsCards(vm: AppViewModel) {
         work.loadPrefs()
         work.loadGoogle()
         work.loadIcs()
+        work.loadTelegram()
     }
     PrefsCard(vm)
+    TelegramCard(vm)
     GoogleCard(vm)
     FeedCard(vm)
 }
@@ -226,5 +235,252 @@ private fun FeedCard(vm: AppViewModel) {
             },
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
         )
+    }
+}
+
+// ---------------------------------------------------------------- Telegram
+
+private val TG_LEADS = listOf(
+    "-1" to "Off", "0" to "When it starts", "5" to "5 minutes before", "10" to "10 minutes before",
+    "15" to "15 minutes before", "30" to "30 minutes before",
+)
+private val TG_TIMER = listOf("0" to "Off", "2" to "2 hours", "3" to "3 hours", "4" to "4 hours", "6" to "6 hours", "8" to "8 hours")
+
+@Composable
+private fun TelegramCard(vm: AppViewModel) {
+    val work = vm.work
+    val t = work.telegram
+    val p = LocalPalette.current
+    val uri = LocalUriHandler.current
+    val clipboard = LocalClipboardManager.current
+    var showBot by remember(t?.configured) { mutableStateOf(false) }
+    var confirmDisconnect by remember { mutableStateOf(false) }
+
+    // While we wait for the user to press Start in Telegram, check every few seconds.
+    LaunchedEffect(t?.configured, t?.linked) {
+        if (t == null || !t.configured || t.linked) return@LaunchedEffect
+        while (true) {
+            delay(3000)
+            work.loadTelegram(quiet = true)
+            if (work.telegram?.linked == true) vm.toast("Telegram connected")
+        }
+    }
+
+    AppCard {
+        CardTitle("Telegram")
+        Spacer(Modifier.height(6.dp))
+        when {
+            t == null -> SubText("Loading…")
+            !t.configured -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SubText(
+                    "Get an alarm for each to-do you give a reminder time, a heads-up before planned time, and a short " +
+                        "morning summary. You can also add to-dos by messaging the bot.",
+                )
+                SubText(
+                    "1. In Telegram, open @BotFather, send /newbot and follow the steps.\n" +
+                        "2. Copy the token it gives you and paste it here.",
+                    color = p.ink2,
+                )
+                TelegramBotForm(vm, t)
+            }
+            !t.linked -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Bot @${t.bot} is ready. Open it in Telegram and press Start, so it knows where to send your reminders.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Button(
+                    onClick = { t.linkUrl?.let { runCatching { uri.openUri(it) }.onFailure { vm.toast("Couldn't open Telegram") } } },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                ) { Text("Open @${t.bot} in Telegram") }
+                SubText("Or send the bot this message: /start ${t.linkCode}. This screen updates by itself.", color = p.muted)
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString("/start ${t.linkCode}"))
+                    vm.toast("Copied")
+                }) { Text("Copy the message") }
+            }
+            else -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Sending to ${t.chat ?: "your chat"} through @${t.bot}.", style = MaterialTheme.typography.bodyMedium)
+                TelegramSendForm(vm, t)
+                SubText(
+                    "Give a to-do a “Remind me” time to get an alarm for it. In the chat, send any text to add a to-do, " +
+                        "or use /today, /todo, /remind 18:30 Call mom, /timer and /stop.",
+                    color = p.muted,
+                )
+            }
+        }
+        if (t?.configured == true) {
+            t.lastError?.let { err ->
+                val at = t.lastErrorAt?.let {
+                    Instant.ofEpochSecond(it).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MMM d, HH:mm", Locale.US))
+                }
+                Spacer(Modifier.height(8.dp))
+                SubText("Last problem${at?.let { " ($it)" } ?: ""}: $err", color = p.critical)
+            }
+            TextButton(onClick = { showBot = !showBot }) { Text(if (showBot) "Hide bot and proxy" else "Bot and proxy") }
+            if (showBot) TelegramBotForm(vm, t)
+            OutlinedButton(
+                onClick = { confirmDisconnect = true },
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text("Disconnect Telegram") }
+        }
+    }
+    if (confirmDisconnect) {
+        AlertDialog(
+            onDismissRequest = { confirmDisconnect = false },
+            title = { Text("Disconnect Telegram?") },
+            text = { Text("The bot stops sending you reminders. You can connect again later.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDisconnect = false
+                    work.disconnectTelegram()
+                }) { Text("Disconnect") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDisconnect = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** The bot token and the SOCKS5 proxy. The server checks them with Telegram before saving. */
+@Composable
+private fun TelegramBotForm(vm: AppViewModel, t: TelegramStatus) {
+    val work = vm.work
+    val p = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    val px = t.proxy
+    var token by remember { mutableStateOf("") }
+    var host by remember(px) { mutableStateOf(px?.host ?: "") }
+    var port by remember(px) { mutableStateOf(px?.port?.toString() ?: "") }
+    var user by remember(px) { mutableStateOf(px?.username ?: "") }
+    var pass by remember { mutableStateOf("") }
+    var showProxy by remember { mutableStateOf(px != null || !t.configured) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val ascii = KeyboardOptions(keyboardType = KeyboardType.Ascii)
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            token, { token = it.trim() }, label = { Text("Bot token") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(if (t.configured) "Saved (${t.tokenHint})" else "123456789:AAH…") },
+            supportingText = if (t.configured) ({ Text("Paste a new one to change it") }) else null,
+            keyboardOptions = ascii,
+        )
+        TextButton(onClick = { showProxy = !showProxy }) { Text(if (showProxy) "Proxy (SOCKS5) ▴" else "Proxy (SOCKS5) ▾") }
+        if (showProxy) {
+            SubText(
+                "If this server can’t reach Telegram directly (for example where it’s blocked), it can go through a SOCKS5 " +
+                    "proxy. Leave the address empty to connect directly. You can also paste a whole socks5:// link into Address.",
+                color = p.muted,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    host, { host = it.trim() }, label = { Text("Address") }, singleLine = true,
+                    modifier = Modifier.weight(2f), placeholder = { Text("127.0.0.1") }, keyboardOptions = ascii,
+                )
+                OutlinedTextField(
+                    port, { v -> port = v.filter { it.isDigit() }.take(5) }, label = { Text("Port") }, singleLine = true,
+                    modifier = Modifier.weight(1f), placeholder = { Text("1080") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    user, { user = it.trim() }, label = { Text("Username") }, singleLine = true,
+                    modifier = Modifier.weight(1f), placeholder = { Text("Optional") }, keyboardOptions = ascii,
+                )
+                OutlinedTextField(
+                    pass, { pass = it }, label = { Text("Password") }, singleLine = true, modifier = Modifier.weight(1f),
+                    placeholder = { Text(if (px?.hasPassword == true) "Saved" else "Optional") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                )
+            }
+        }
+        error?.let { SubText(it, color = p.critical) }
+        Button(
+            enabled = !busy, modifier = Modifier.fillMaxWidth().height(48.dp),
+            onClick = {
+                if (!t.configured && token.isBlank()) {
+                    error = "Paste the bot token from @BotFather"
+                    return@Button
+                }
+                val proxy = if (host.isBlank()) null else jsonBody(
+                    *buildList {
+                        add("host" to host)
+                        add("port" to port.ifBlank { null })
+                        add("username" to user)
+                        if (pass.isNotEmpty() || px?.hasPassword != true) add("password" to pass) // empty keeps the saved one
+                    }.toTypedArray(),
+                )
+                val body = jsonBody(
+                    *buildList {
+                        add("tz" to ZoneId.systemDefault().id)
+                        add("proxy" to proxy)
+                        if (token.isNotBlank()) add("token" to token)
+                    }.toTypedArray(),
+                )
+                busy = true
+                error = null
+                scope.launch {
+                    error = work.saveTelegramBot(body)
+                    busy = false
+                    if (error == null) {
+                        token = ""
+                        pass = ""
+                        vm.toast(if (work.telegram?.linked == true) "Saved" else "Connected to @${work.telegram?.bot}")
+                    }
+                }
+            },
+        ) { Text(if (busy) "Checking…" else "Save and check") }
+    }
+}
+
+/** What to send: morning summary, heads-up before planned time, timer nudge, ringing again. */
+@Composable
+private fun TelegramSendForm(vm: AppViewModel, t: TelegramStatus) {
+    val work = vm.work
+    val p = LocalPalette.current
+    val scope = rememberCoroutineScope()
+    val s = t.settings
+    var brief by remember(s) { mutableStateOf(s.brief) }
+    var briefTime by remember(s) { mutableStateOf(runCatching { LocalTime.parse(s.briefTime) }.getOrDefault(LocalTime.of(8, 0))) }
+    var lead by remember(s) { mutableStateOf(s.lead.toString()) }
+    var timer by remember(s) { mutableStateOf(s.timerHours.toString()) }
+    var again by remember(s) { mutableStateOf(s.ringAgain) }
+    var busy by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Morning summary", style = MaterialTheme.typography.bodyMedium)
+                SubText("Today’s plan and the to-dos that are due. Skipped on days with nothing on.", color = p.muted)
+            }
+            Switch(brief, { brief = it })
+        }
+        if (brief) TimeField("Summary time", briefTime, Modifier.fillMaxWidth()) { briefTime = it }
+        Picker("Heads-up before planned time", TG_LEADS, lead) { lead = it }
+        Picker("Nudge me when a timer is still running after", TG_TIMER, timer) { timer = it }
+        SubText("Not between 23:00 and 07:00.", color = p.muted)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Ring again after 5 minutes if I don’t answer an alarm",
+                modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+            )
+            Switch(again, { again = it })
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    work.saveTelegram(
+                        jsonBody(
+                            "brief" to brief, "brief_time" to hm(briefTime), "lead" to lead.toInt(),
+                            "timer_hours" to timer.toInt(), "ring_again" to again, "tz" to ZoneId.systemDefault().id,
+                        ),
+                    )
+                    busy = false
+                }
+            }) { Text("Save") }
+            OutlinedButton(onClick = { work.testTelegram() }) { Text("Send a test message") }
+        }
     }
 }

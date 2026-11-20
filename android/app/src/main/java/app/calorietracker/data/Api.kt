@@ -206,6 +206,8 @@ data class TaskItem(
     val id: Long, val projectId: Long? = null, val title: String, val notes: String = "", val due: String? = null,
     val priority: Int = 0, val done: Boolean = false, val doneAt: Long? = null, val createdAt: Long = 0,
     val total: Long = 0,
+    /** When Telegram sends an alarm for it (epoch seconds), or null. */
+    val remindAt: Long? = null,
 )
 
 @Serializable
@@ -249,6 +251,23 @@ data class GoogleStatus(
     val email: String? = null, val calendarId: String? = null, val showEvents: Boolean = true,
     val lastSync: Long? = null, val lastError: String? = null, val needsReauth: Boolean = false, val pending: Int = 0,
     val pushed: Int = 0,
+)
+
+@Serializable
+data class TelegramSettings(
+    val brief: Boolean = true, val briefTime: String = "08:00", val lead: Int = 5, val timerHours: Int = 4,
+    val ringAgain: Boolean = true,
+)
+
+@Serializable
+data class TelegramProxy(val host: String = "", val port: Int? = null, val username: String = "", val hasPassword: Boolean = false)
+
+@Serializable
+data class TelegramStatus(
+    val configured: Boolean = false, val linked: Boolean = false, val bot: String = "", val tokenHint: String = "",
+    val chat: String? = null, val linkCode: String? = null, val linkUrl: String? = null,
+    val proxy: TelegramProxy? = null, val settings: TelegramSettings = TelegramSettings(), val tz: String = "UTC",
+    val lastOk: Long? = null, val lastError: String? = null, val lastErrorAt: Long? = null,
 )
 
 @Serializable

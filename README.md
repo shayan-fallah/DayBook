@@ -39,8 +39,11 @@ mobile-friendly web page and an Android app. Your data lives in one SQLite file.
 - **Planner** (Plan tab): a day timeline with a week strip. Tap an empty spot to plan time for a project or
   task, repeat it (every day, every work day, every week), and start the timer from a planned block. What you
   actually logged shows as thin bars next to the plan.
-- **To-do list**: quick add with due date and project, priorities, notes; grouped into overdue, today,
-  upcoming and someday. Start a timer on a to-do or plan time for it in one tap.
+- **To-do list**: quick add with due date and project, priorities, notes, and an optional "Remind me" time;
+  grouped into overdue, today, upcoming and someday. Start a timer on a to-do or plan time for it in one tap.
+- **Telegram reminders**: alarms for to-dos (with Done and snooze buttons), a heads-up before planned time,
+  a short morning summary and a nudge for a forgotten timer, from your own bot. Add to-dos by messaging it.
+  Works through a SOCKS5 proxy where Telegram is blocked. See below.
 - **Google Calendar**: planned blocks appear in a calendar you pick (in the project's color), your Google events
   appear in the planner, and moving or deleting a block in Google changes it here too. See below.
 - **Calendar feed**: a private link to subscribe to from any calendar app (planned blocks and dated to-dos).
@@ -183,6 +186,42 @@ No domain or don't want to set this up? **Settings → Calendar feed** gives you
 Calendar (*Other calendars → From URL*), Apple Calendar or Outlook. It's read-only and Google refreshes it every
 few hours.
 
+## Telegram reminders (optional)
+
+Each account links its own Telegram bot in Settings → Telegram:
+
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot` and follow the steps. Copy the token.
+2. Paste it into Settings → Telegram and press **Save and check**. If the server can't reach Telegram
+   directly (for example in a country where it's blocked), fill in a **SOCKS5 proxy** under the token first:
+   address, port and an optional username and password, or paste a whole `socks5://user:pass@host:port` link.
+   Telegram's address is looked up through the proxy.
+3. Press **Open @yourbot in Telegram** and then **Start**. Only the chat that opens this link gets messages;
+   anyone else who finds the bot is ignored.
+
+What the bot sends (each can be changed or turned off in Settings):
+
+- **Alarms** for to-dos you give a "Remind me" time, with ✓ Done, OK and snooze (10 min, 1 hour, tomorrow)
+  buttons. An unanswered alarm rings once more after 5 minutes.
+- **A heads-up** 5 minutes (or 0–30) before each planned block, with a ▶ Start timer button.
+- **A morning summary** at 08:00 (or your time): today's plan and the to-dos that are due. Nothing is sent
+  on days with nothing on.
+- **A nudge** when a timer has been running for 4 hours (or 2–8), with Stop and Keep going. Not at night.
+
+In the chat, any text becomes a to-do (first line the title, the rest notes), and there are `/today`, `/todo`,
+`/remind 18:30 Call mom` (also `20m`, `2h`, `tomorrow 9:00`), `/timer` and `/stop`.
+
+The server checks for things to send every 15 seconds while it waits for messages from Telegram, so it needs
+no public address or webhook. Times use the time zone of the device you saved the settings from.
+
+If the server has no proxy of its own but you have SSH access to a machine where Telegram works, a SOCKS5
+tunnel is one command (run it as a service so it comes back after a reboot):
+
+```bash
+ssh -N -D 127.0.0.1:1080 -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes you@other-server
+```
+
+Then use address `127.0.0.1`, port `1080`.
+
 ## Moving over from Sakura Log
 
 Copy Sakura Log's database (`data/logger.db`) or its JSON backup (Settings → Download backup) to the server and
@@ -207,6 +246,7 @@ python3 app.py import-sakura /path/to/logger.db yourname
 | `PUBLIC_URL` | – | The address people use, e.g. `https://daybook.example.com` (for Google and the calendar feed link; otherwise taken from the request) |
 | `GOOGLE_CLIENT_ID` | – | Google OAuth client ID, turns on Google Calendar (see above) |
 | `GOOGLE_CLIENT_SECRET` | – | Its secret |
+| `TELEGRAM_API_URL` | `https://api.telegram.org` | Bot API address, for a self-hosted Bot API server or a relay |
 
 ## Admin commands
 

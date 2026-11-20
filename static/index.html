@@ -295,7 +295,7 @@
       <div class="card meal more-list">
         <a href="#history" class="more-row"><span>History</span><small>Calories, weight and macros over time</small></a>
         <a href="#foods" class="more-row"><span>Foods</span><small>Find and edit foods, your own foods, favorites</small></a>
-        <a href="#settings" class="more-row"><span>Settings</span><small>Goals, Google Calendar, password, your data</small></a>
+        <a href="#settings" class="more-row"><span>Settings</span><small>Goals, Telegram reminders, Google Calendar, password</small></a>
       </div>
     </section>
 
@@ -386,6 +386,11 @@
         <p class="error" id="prefs-error" role="alert"></p>
         <button class="wide">Save</button>
       </form>
+
+      <div class="card" id="tg-card">
+        <h2>Telegram</h2>
+        <div id="tg-body" class="form"><p class="muted">Loading…</p></div>
+      </div>
 
       <div class="card" id="google-card">
         <h2>Google Calendar</h2>
@@ -666,14 +671,18 @@
         <label>Project <select name="proj"></select></label>
         <label>Due <input name="due" type="date"></label>
       </div>
-      <label>Priority
-        <select name="priority">
-          <option value="0">None</option>
-          <option value="1">Low</option>
-          <option value="2">Medium</option>
-          <option value="3">High</option>
-        </select>
-      </label>
+      <div class="grid2">
+        <label>Priority
+          <select name="priority">
+            <option value="0">None</option>
+            <option value="1">Low</option>
+            <option value="2">Medium</option>
+            <option value="3">High</option>
+          </select>
+        </label>
+        <label>Remind me <input name="remind" type="datetime-local" aria-describedby="task-remind-hint"></label>
+      </div>
+      <p class="hint" id="task-remind-hint" hidden>Reminders arrive in Telegram. Set it up in Settings → Telegram.</p>
       <label>Notes <textarea name="notes" dir="auto" rows="3" maxlength="2000"></textarea></label>
       <label class="check"><input type="checkbox" name="done"> Done</label>
       <p class="hint" id="task-stats"></p>

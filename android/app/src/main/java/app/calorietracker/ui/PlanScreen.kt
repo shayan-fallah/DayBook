@@ -83,6 +83,7 @@ import app.calorietracker.WorkStore
 import app.calorietracker.data.GoogleEvent
 import app.calorietracker.data.PlanBlock
 import app.calorietracker.data.TaskItem
+import app.calorietracker.data.WorkPrefs
 import app.calorietracker.data.jsonBody
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -684,6 +685,7 @@ private fun TaskRow(work: WorkStore, t: TaskItem, onOpen: () -> Unit, onSchedule
         project?.let { add(isolate(it.name)) }
         t.due?.let { add(prefs.dueText(it)) }
         if (t.priority > 0) add("${PRIORITY_NAMES[t.priority]} priority")
+        t.remindAt?.takeIf { !t.done && it > work.now() }?.let { add("⏰ ${prefs.remindText(it)}") }
         if (t.total > 0) add("${hrs(t.total)} logged")
         if (t.notes.isNotBlank()) add("✎ notes")
     }
@@ -727,6 +729,20 @@ private fun TaskRow(work: WorkStore, t: TaskItem, onOpen: () -> Unit, onSchedule
     }
 }
 
+/** Today: the next full hour; another day: 9:00. */
+private fun defaultRemindTime(d: LocalDate): LocalTime =
+    if (d == LocalDate.now()) LocalTime.now().plusHours(1).withMinute(0).withSecond(0).withNano(0) else LocalTime.of(9, 0)
+
+private fun WorkPrefs.remindText(ts: Long): String {
+    val d = dateOfTs(ts)
+    val today = LocalDate.now()
+    return when (d) {
+        today -> hm(ts)
+        today.plusDays(1) -> "Tomorrow ${hm(ts)}"
+        else -> "${shortDay(d)} ${hm(ts)}"
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TaskSheet(work: WorkStore, task: TaskItem?, onSchedule: ((TaskItem) -> Unit)?, defaultProject: Long? = null, onDismiss: () -> Unit) {
@@ -738,6 +754,9 @@ private fun TaskSheet(work: WorkStore, task: TaskItem?, onSchedule: ((TaskItem) 
     var priority by remember { mutableStateOf((task?.priority ?: 0).toString()) }
     var notes by remember { mutableStateOf(task?.notes ?: "") }
     var done by remember { mutableStateOf(task?.done ?: false) }
+    var remindDate by remember { mutableStateOf(task?.remindAt?.let { dateOfTs(it) }) }
+    var remindTime by remember { mutableStateOf(task?.remindAt?.let { timeOfTs(it) }) }
+    LaunchedEffect(Unit) { if (work.telegram == null) work.loadTelegram(quiet = true) }
     var confirmDelete by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
 
@@ -764,6 +783,19 @@ private fun TaskSheet(work: WorkStore, task: TaskItem?, onSchedule: ((TaskItem) 
                 DateField("Due", due, work.prefs.shortDay(due ?: LocalDate.now()), Modifier.weight(1f), allowClear = true) { due = it }
             }
             Picker("Priority", PRIORITY_NAMES.mapIndexed { i, n -> i.toString() to n }, priority) { priority = it }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                DateField(
+                    "Remind me", remindDate, work.prefs.shortDay(remindDate ?: LocalDate.now()), Modifier.weight(1f),
+                    allowClear = true,
+                ) { d ->
+                    remindDate = d
+                    if (d != null && remindTime == null) remindTime = defaultRemindTime(d)
+                }
+                TimeField("At", remindTime, Modifier.weight(1f), enabled = remindDate != null) { remindTime = it }
+            }
+            if (remindDate != null && work.telegram?.linked == false) {
+                SubText("Reminders arrive in Telegram. Set it up in Settings → Telegram.", color = LocalPalette.current.muted)
+            }
             OutlinedTextField(
                 notes, { notes = it }, label = { Text("Notes") }, modifier = Modifier.fillMaxWidth(), minLines = 3,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(textDirection = TextDirection.Content),
@@ -799,6 +831,7 @@ private fun TaskSheet(work: WorkStore, task: TaskItem?, onSchedule: ((TaskItem) 
                                 jsonBody(
                                     "title" to title.trim(), "project_id" to pid, "due" to due?.toString(),
                                     "priority" to priority.toInt(), "notes" to notes, "done" to done,
+                                    "remind_at" to remindDate?.let { tsOf(it, remindTime ?: defaultRemindTime(it)) },
                                 ),
                             )
                             busy = false

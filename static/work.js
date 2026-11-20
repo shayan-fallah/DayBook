@@ -21,6 +21,7 @@ const W = {
   planDate: todayISO(), week: null, scrolledFor: null,
   todoFilter: 'all',
   google: null, calendars: null,
+  telegram: null,
 };
 
 // ---------------------------------------------------------------- time helpers
@@ -37,6 +38,8 @@ const overlap = (e, a, b) => Math.max(0, Math.min(endOf(e), b) - Math.max(e.star
 const spanIn = (s, e, a, b) => Math.max(0, Math.min(e, b) - Math.max(s, a));
 const hoursText2 = (sec) => `${fmt1(sec / 3600)} h`;
 const selVal = (sel) => (sel.value === '' ? null : Number(sel.value));
+const localDT = (ts) => `${isoOfTs(ts)}T${hm(ts)}`; // for <input type="datetime-local">
+const tsOfLocalDT = (v) => (v ? tsOf(new Date(v)) : null);
 
 function clock(sec) {
   const s = Math.max(0, Math.floor(sec));
@@ -1277,6 +1280,7 @@ function taskRow(t) {
   if (p) sub.push(el('span', { class: 'pname' }, el('i', { class: 'dot', style: `background:${p.color}` }), el('bdi', {}, p.name)));
   if (t.due) sub.push(el('span', { class: !t.done && t.due < todayISO() ? 'late' : '' }, dueText(t.due)));
   if (t.priority) sub.push(el('span', { class: `prio p${t.priority}` }, `${PRIORITY[t.priority]} priority`));
+  if (t.remind_at && !t.done && t.remind_at > nowS()) sub.push(el('span', { class: 'remind' }, `⏰ ${remindText(t.remind_at)}`));
   if (t.total) sub.push(el('span', {}, `${hrs(t.total)} logged`));
   if (t.notes) sub.push(el('span', { title: t.notes }, '✎ notes'));
   const plan = el('button', { class: 'icon small', type: 'button', title: 'Plan time for it', 'aria-label': `Plan time for ${t.title}`, onclick: () => scheduleTask(t) });
@@ -1294,6 +1298,14 @@ function taskRow(t) {
       class: 'icon small play', type: 'button', title: 'Start timer', 'aria-label': `Start timer on ${t.title}`,
       onclick: () => startTimer({ description: '', project_id: t.project_id, task_id: t.id }),
     }, '▶'));
+}
+
+function remindText(ts) {
+  const iso = isoOfTs(ts);
+  const diff = daysBetween(todayISO(), iso);
+  if (diff === 0) return hm(ts);
+  if (diff === 1) return `Tomorrow ${hm(ts)}`;
+  return `${shortDay(iso)} ${hm(ts)}`;
 }
 
 async function toggleTask(t) {
@@ -1344,6 +1356,9 @@ function openTask(t) {
   tf.proj.value = t && t.project_id != null ? String(t.project_id) : '';
   tf.due.value = t && t.due ? t.due : '';
   tf.priority.value = String(t ? t.priority : 0);
+  tf.remind.value = t && t.remind_at ? localDT(t.remind_at) : '';
+  updateRemindHint();
+  if (!W.telegram) loadTelegram().then(updateRemindHint);
   tf.notes.value = t ? t.notes : '';
   tf.done.checked = !!(t && t.done);
   $('#task-title').textContent = t ? 'To-do' : 'New to-do';
@@ -1359,6 +1374,7 @@ tf.addEventListener('submit', async (ev) => {
   const body = {
     title: tf.title.value.trim(), project_id: selVal(tf.proj), due: tf.due.value || null,
     priority: Number(tf.priority.value), notes: tf.notes.value, done: tf.done.checked,
+    remind_at: tsOfLocalDT(tf.remind.value),
   };
   const res = await run(() => (t ? api('PATCH', `/api/tasks/${t.id}`, body) : api('POST', '/api/tasks', body)), $('#task-error'));
   if (!res) return;
@@ -1367,6 +1383,13 @@ tf.addEventListener('submit', async (ev) => {
   await loadTasks();
   if (state.view === 'plan') showPlan(W.planTab);
 });
+
+/** Reminders only arrive once Telegram is linked; say so when one is set. */
+function updateRemindHint() {
+  const tg = W.telegram;
+  $('#task-remind-hint').hidden = !tf.remind.value || !tg || tg.linked;
+}
+tf.remind.addEventListener('input', updateRemindHint);
 
 $('#task-delete').addEventListener('click', async () => {
   const t = editingTask;
@@ -1391,6 +1414,8 @@ async function loadWorkSettings() {
   fillPrefsForm();
   $('#export-time').href = `/api/export?type=time&tz=${-new Date().getTimezoneOffset()}`;
   loadPrefs().then(fillPrefsForm);
+  renderTelegram();
+  loadTelegram();
   renderGoogle();
   loadGoogle();
   loadIcs();
@@ -1527,3 +1552,168 @@ $('#ics-reset').addEventListener('click', async () => {
   const r = await run(() => api('POST', '/api/ics/reset'));
   if (r) { $('#ics-url').value = r.url; toast('New link made'); }
 });
+
+// ---------------------------------------------------------------- settings: Telegram
+
+const TG_LEADS = [[-1, 'Off'], [0, 'When it starts'], [5, '5 minutes before'], [10, '10 minutes before'],
+  [15, '15 minutes before'], [30, '30 minutes before']];
+const TG_TIMER = [[0, 'Off'], [2, '2 hours'], [3, '3 hours'], [4, '4 hours'], [6, '6 hours'], [8, '8 hours']];
+let tgPollTimer = null;
+
+function browserTz() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; } catch { return undefined; }
+}
+
+async function loadTelegram() {
+  const t = await run(() => api('GET', '/api/telegram'));
+  if (!t) return;
+  const changed = JSON.stringify(t) !== JSON.stringify(W.telegram);
+  W.telegram = t;
+  if (changed) renderTelegram();
+}
+
+/** While we wait for the user to press Start in Telegram, check every few seconds. */
+function pollTelegramLink() {
+  clearTimeout(tgPollTimer);
+  const t = W.telegram;
+  if (!t || !t.configured || t.linked || state.view !== 'settings') return;
+  tgPollTimer = setTimeout(async () => {
+    if (!document.hidden) await loadTelegram();
+    if (W.telegram && W.telegram.linked) toast('Telegram connected');
+    pollTelegramLink();
+  }, 3000);
+}
+
+function selectOf(list, value, label) {
+  const sel = el('select', { 'aria-label': label }, list.map(([v, text]) => el('option', { value: String(v) }, text)));
+  sel.value = String(value);
+  return sel;
+}
+
+/** The bot token and the SOCKS5 proxy. */
+function tgBotForm(t) {
+  const p = t.proxy || {};
+  const token = el('input', {
+    name: 'token', autocomplete: 'off', spellcheck: false, dir: 'ltr',
+    placeholder: t.configured ? `Saved (${t.token_hint}). Paste a new one to change it.` : '123456789:AAH…',
+  });
+  const host = el('input', { name: 'host', autocomplete: 'off', spellcheck: false, dir: 'ltr', value: p.host || '', placeholder: '127.0.0.1' });
+  const port = el('input', { name: 'port', inputmode: 'numeric', autocomplete: 'off', value: p.port ? String(p.port) : '', placeholder: '1080' });
+  const user = el('input', { name: 'user', autocomplete: 'off', spellcheck: false, dir: 'ltr', value: p.username || '' });
+  const pass = el('input', { name: 'pass', type: 'password', autocomplete: 'new-password', placeholder: p.has_password ? 'Saved' : '' });
+  const err = el('p', { class: 'error', role: 'alert' });
+  const save = el('button', { class: 'primary wide' }, 'Save and check');
+  const proxy = el('details', { class: 'tg-more', open: !!t.proxy || !t.configured },
+    el('summary', {}, 'Proxy (SOCKS5)'),
+    el('div', { class: 'form' },
+      el('p', { class: 'hint' }, 'If this server can’t reach Telegram directly (for example where it’s blocked), it can go through a SOCKS5 proxy. '
+        + 'Leave the address empty to connect directly. You can also paste a whole socks5:// link into Address.'),
+      el('div', { class: 'grid2' }, el('label', {}, 'Address', host), el('label', {}, 'Port', port)),
+      el('div', { class: 'grid2' }, el('label', {}, 'Username (optional)', user), el('label', {}, 'Password (optional)', pass))));
+  const form = el('form', { class: 'form', novalidate: true },
+    el('label', {}, 'Bot token', token), proxy, err, save);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { tz: browserTz() };
+    if (token.value.trim()) body.token = token.value.trim();
+    if (host.value.trim()) {
+      body.proxy = { host: host.value.trim(), port: port.value.trim() || null, username: user.value.trim() };
+      // An empty password box keeps the saved password.
+      if (pass.value || !p.has_password) body.proxy.password = pass.value;
+    } else {
+      body.proxy = null;
+    }
+    save.disabled = true;
+    save.textContent = 'Checking…';
+    const res = await run(() => api('PUT', '/api/telegram/bot', body), err);
+    save.disabled = false;
+    save.textContent = 'Save and check';
+    if (!res) return;
+    W.telegram = res;
+    toast(res.linked ? 'Saved' : `Connected to @${res.bot}`);
+    renderTelegram();
+  });
+  return form;
+}
+
+/** What to send: morning summary, heads-up, timer nudge, ringing again. */
+function tgSendForm(t) {
+  const s = t.settings;
+  const brief = el('input', { type: 'checkbox', checked: s.brief });
+  const briefTime = el('input', { type: 'time', value: s.brief_time, 'aria-label': 'Time of the morning summary' });
+  const lead = selectOf(TG_LEADS, s.lead, 'Heads-up before planned time');
+  const timer = selectOf(TG_TIMER, s.timer_hours, 'Timer nudge');
+  const again = el('input', { type: 'checkbox', checked: s.ring_again });
+  const err = el('p', { class: 'error', role: 'alert' });
+  const test = el('button', { type: 'button' }, 'Send a test message');
+  test.addEventListener('click', async () => {
+    test.disabled = true;
+    const res = await run(() => api('POST', '/api/telegram/test'), err);
+    test.disabled = false;
+    if (res) { W.telegram = res; toast('Sent. Check Telegram.'); }
+  });
+  const form = el('form', { class: 'form', novalidate: true },
+    el('div', { class: 'check-time' }, el('label', { class: 'check' }, brief, ' Morning summary at'), briefTime),
+    el('p', { class: 'hint' }, 'Today’s plan and the to-dos that are due. Skipped on days with nothing on.'),
+    el('label', {}, 'Heads-up before planned time', lead),
+    el('label', {}, 'Nudge me when a timer is still running after', timer),
+    el('p', { class: 'hint' }, 'Not between 23:00 and 07:00.'),
+    el('label', { class: 'check' }, again, ' Ring again after 5 minutes if I don’t answer an alarm'),
+    err,
+    el('div', { class: 'btn-row' }, el('button', { class: 'primary' }, 'Save'), test));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await run(() => api('PUT', '/api/telegram', {
+      brief: brief.checked, brief_time: briefTime.value || '08:00', lead: Number(lead.value),
+      timer_hours: Number(timer.value), ring_again: again.checked, tz: browserTz(),
+    }), err);
+    if (res) { W.telegram = res; toast('Saved'); }
+  });
+  return form;
+}
+
+function renderTelegram() {
+  const box = $('#tg-body');
+  const t = W.telegram;
+  if (!t) { box.replaceChildren(el('p', { class: 'muted' }, 'Loading…')); return; }
+  const kids = [];
+  if (!t.configured) {
+    kids.push(
+      el('p', { class: 'sub' }, 'Get an alarm for each to-do you give a reminder time, a heads-up before planned time, and a short morning summary. '
+        + 'You can also add to-dos by messaging the bot.'),
+      el('ol', { class: 'steps' },
+        el('li', {}, 'In Telegram, open ', el('b', {}, '@BotFather'), ', send ', el('code', {}, '/newbot'), ' and follow the steps.'),
+        el('li', {}, 'Copy the token it gives you and paste it here.')),
+      tgBotForm(t));
+  } else if (!t.linked) {
+    kids.push(
+      el('p', { class: 'sub' }, 'Bot ', el('b', {}, `@${t.bot}`), ' is ready. Open it in Telegram and press ', el('b', {}, 'Start'),
+        ', so it knows where to send your reminders.'),
+      el('a', { class: 'btn primary wide', href: t.link_url, target: '_blank', rel: 'noopener' }, `Open @${t.bot} in Telegram`),
+      el('p', { class: 'hint' }, 'Or send the bot this message: ', el('code', {}, `/start ${t.link_code}`), '. This page updates by itself.'));
+  } else {
+    kids.push(el('p', { class: 'sub' }, 'Sending to ', el('b', {}, t.chat || 'your chat'), ' through ', el('b', {}, `@${t.bot}`), '.'),
+      tgSendForm(t),
+      el('p', { class: 'hint' }, 'Give a to-do a “Remind me” time to get an alarm for it. In the chat, send any text to add a to-do, or use ',
+        el('code', {}, '/today'), ', ', el('code', {}, '/todo'), ', ', el('code', {}, '/remind 18:30 Call mom'), ', ',
+        el('code', {}, '/timer'), ' and ', el('code', {}, '/stop'), '.'));
+  }
+  if (t.configured) {
+    if (t.last_error) {
+      const when = new Date(t.last_error_at * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+      kids.push(el('p', { class: 'error' }, `Last problem (${when}): ${t.last_error}`));
+    }
+    kids.push(el('details', { class: 'tg-more' }, el('summary', {}, 'Bot and proxy'), tgBotForm(t)),
+      el('div', { class: 'btn-row' }, el('button', { type: 'button', class: 'danger', onclick: disconnectTelegram }, 'Disconnect Telegram')));
+  }
+  box.replaceChildren(...kids);
+  pollTelegramLink();
+}
+
+async function disconnectTelegram() {
+  if (!confirm('Disconnect Telegram? The bot stops sending you reminders. You can connect again later.')) return;
+  if (!await run(() => api('DELETE', '/api/telegram'))) return;
+  toast('Disconnected');
+  W.telegram = null;
+  loadTelegram();
+}

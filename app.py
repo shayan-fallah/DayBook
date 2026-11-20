@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Daybook: food, workouts, time tracking and planning. A small self-hosted web app.
+"""Daybook: food, workouts, time tracking and planning, with Telegram reminders. A small self-hosted web app.
 
 Python 3.9+ standard library only. Data lives in one SQLite file.
 
@@ -16,13 +16,16 @@ import datetime as dt
 import getpass
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import mimetypes
 import os
 import re
 import secrets
+import socket
 import sqlite3
+import ssl
 import sys
 import threading
 import time
@@ -32,7 +35,8 @@ import urllib.request
 from html import escape as html_escape
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -186,7 +190,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', due TEXT, priority INTEGER NOT NULL DEFAULT 0,
-    done INTEGER NOT NULL DEFAULT 0, done_at INTEGER, created_at INTEGER NOT NULL);
+    done INTEGER NOT NULL DEFAULT 0, done_at INTEGER, created_at INTEGER NOT NULL,
+    remind_at INTEGER, rings INTEGER NOT NULL DEFAULT 0, rang_at INTEGER, ring_msg INTEGER);
 CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, done);
 CREATE TABLE IF NOT EXISTS time_entries (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -214,6 +219,15 @@ CREATE TABLE IF NOT EXISTS google_accounts (
 CREATE TABLE IF NOT EXISTS oauth_states (
     state TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     redirect_uri TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS telegram (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    bot_token TEXT NOT NULL, bot_username TEXT NOT NULL DEFAULT '', proxy TEXT,
+    chat_id INTEGER, chat_name TEXT, link_code TEXT,
+    settings TEXT NOT NULL DEFAULT '{}', tz TEXT NOT NULL DEFAULT 'UTC', update_offset INTEGER NOT NULL DEFAULT 0,
+    last_ok INTEGER, last_error TEXT, last_error_at INTEGER, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tg_sent (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, key TEXT NOT NULL, sent_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, key));
 """
 
 
@@ -242,6 +256,11 @@ def migrate(db):
                       ("prefs", "TEXT"), ("ics_token", "TEXT")):
         if name not in cols:
             db.execute(f"ALTER TABLE profiles ADD COLUMN {name} {ddl}")
+    cols = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+    for name, ddl in (("remind_at", "INTEGER"), ("rings", "INTEGER NOT NULL DEFAULT 0"), ("rang_at", "INTEGER"),
+                      ("ring_msg", "INTEGER")):
+        if name not in cols:
+            db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
     # Calories typed into the old "Exercise" box become workouts, so there is one place for them.
     for r in db.execute("SELECT user_id, date, exercise_kcal FROM days WHERE exercise_kcal > 0").fetchall():
         db.execute("INSERT INTO workouts (user_id, date, activity, name, kcal, kcal_manual, created_at) "
@@ -1571,7 +1590,7 @@ def api_project_delete(c, pid):
 def task_json(r, total=0):
     return {"id": r["id"], "project_id": r["project_id"], "title": r["title"], "notes": r["notes"],
             "due": r["due"], "priority": r["priority"], "done": bool(r["done"]), "done_at": r["done_at"],
-            "created_at": r["created_at"], "total": total or 0}
+            "created_at": r["created_at"], "total": total or 0, "remind_at": r["remind_at"]}
 
 
 def _task_values(db, uid, b, old=None):
@@ -1586,7 +1605,9 @@ def _task_values(db, uid, b, old=None):
     project_id = ref_id(get("project_id"), "project")
     if project_id is not None:
         owned(db, "projects", uid, project_id, "Project")
-    return {"title": title, "notes": notes, "due": due, "priority": priority, "project_id": project_id}
+    remind_at = ts_value(get("remind_at"), "Reminder time", allow_none=True)
+    return {"title": title, "notes": notes, "due": due, "priority": priority, "project_id": project_id,
+            "remind_at": remind_at}
 
 
 @route("GET", "/api/tasks")
@@ -1602,9 +1623,10 @@ def api_tasks(c):
 @route("POST", "/api/tasks")
 def api_task_add(c):
     v = _task_values(c.db, c.uid, c.body)
-    cur = c.db.execute("INSERT INTO tasks (user_id, project_id, title, notes, due, priority, created_at) "
-                       "VALUES (?,?,?,?,?,?,?)",
-                       (c.uid, v["project_id"], v["title"], v["notes"], v["due"], v["priority"], now_ts()))
+    cur = c.db.execute("INSERT INTO tasks (user_id, project_id, title, notes, due, priority, remind_at, created_at) "
+                       "VALUES (?,?,?,?,?,?,?,?)",
+                       (c.uid, v["project_id"], v["title"], v["notes"], v["due"], v["priority"], v["remind_at"],
+                        now_ts()))
     return task_json(owned(c.db, "tasks", c.uid, cur.lastrowid, "Task"))
 
 
@@ -1614,8 +1636,12 @@ def api_task_edit(c, tid):
     v = _task_values(c.db, c.uid, c.body, old)
     done = bool(c.body["done"]) if "done" in c.body else bool(old["done"])
     done_at = (old["done_at"] or now_ts()) if done and old["done"] else (now_ts() if done else None)
-    c.db.execute("UPDATE tasks SET project_id=?, title=?, notes=?, due=?, priority=?, done=?, done_at=? WHERE id=?",
-                 (v["project_id"], v["title"], v["notes"], v["due"], v["priority"], int(done), done_at, old["id"]))
+    c.db.execute("UPDATE tasks SET project_id=?, title=?, notes=?, due=?, priority=?, done=?, done_at=?, remind_at=? "
+                 "WHERE id=?",
+                 (v["project_id"], v["title"], v["notes"], v["due"], v["priority"], int(done), done_at, v["remind_at"],
+                  old["id"]))
+    if v["remind_at"] != old["remind_at"] or (old["done"] and not done):  # a new or reopened alarm rings again
+        c.db.execute("UPDATE tasks SET rings=0, rang_at=NULL, ring_msg=NULL WHERE id=?", (old["id"],))
     return task_json(owned(c.db, "tasks", c.uid, old["id"], "Task"), sums_by(c.db, "task_id", c.uid).get(old["id"]))
 
 
@@ -1652,26 +1678,34 @@ def api_timer(c):
     return {"running": running_entry(c.db, c.uid), "now": now_ts()}
 
 
+def timer_start(db, uid, project_id, task_id, description, t):
+    """Start the timer. A timer that's already running stops first."""
+    db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE user_id=? AND end_ts IS NULL", (t, uid))
+    db.execute("INSERT INTO time_entries (user_id, project_id, task_id, description, start_ts) VALUES (?,?,?,?,?)",
+               (uid, project_id, task_id, description, t))
+
+
+def timer_stop(db, uid, t):
+    """Stop the running timer; returns the stopped entry, or None if nothing was running."""
+    r = running_entry(db, uid)
+    if not r:
+        return None
+    db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE id=?", (t, r["id"]))
+    return time_json(owned(db, "time_entries", uid, r["id"], "Entry"))
+
+
 @route("POST", "/api/time/timer/start")
 def api_timer_start(c):
-    """Start the timer. A timer that's already running stops first."""
     b = c.body
     pid, tid = project_task_refs(c.db, c.uid, ref_id(b.get("project_id"), "project"), ref_id(b.get("task_id"), "task"))
-    desc = text(b.get("description"), "Description", 300, required=False)
     t = now_ts()
-    c.db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE user_id=? AND end_ts IS NULL", (t, c.uid))
-    c.db.execute("INSERT INTO time_entries (user_id, project_id, task_id, description, start_ts) VALUES (?,?,?,?,?)",
-                 (c.uid, pid, tid, desc, t))
+    timer_start(c.db, c.uid, pid, tid, text(b.get("description"), "Description", 300, required=False), t)
     return {"running": running_entry(c.db, c.uid), "now": t}
 
 
 @route("POST", "/api/time/timer/stop")
 def api_timer_stop(c):
-    r = running_entry(c.db, c.uid)
-    if not r:
-        return {"stopped": None}
-    c.db.execute("UPDATE time_entries SET end_ts=MAX(?, start_ts + 1) WHERE id=?", (now_ts(), r["id"]))
-    return {"stopped": time_json(owned(c.db, "time_entries", c.uid, r["id"], "Entry"))}
+    return {"stopped": timer_stop(c.db, c.uid, now_ts())}
 
 
 def _check_span(start, end, running=False):
@@ -2439,6 +2473,973 @@ def import_sakura(db, uid, path):
 
 # ---------------------------------------------------------------- HTTP handler
 
+# ---------------------------------------------------------------- Telegram
+#
+# Each user can link their own Telegram bot (made with @BotFather). One worker thread per bot long-polls Telegram
+# for messages and button presses, and in between sends what's due: alarms for to-dos with a reminder time, a
+# heads-up before planned blocks, a short morning summary and a nudge when a timer is left running. Telegram is
+# reached directly or through a SOCKS5 proxy, for servers where it's blocked.
+
+TELEGRAM_API = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")
+TG_POLL = int(os.environ.get("TELEGRAM_POLL_SECONDS", "15"))  # long-poll length: also how often alarms are checked
+TG = None  # TelegramHub, started in main()
+TG_DEFAULTS = {"brief": True, "brief_time": "08:00", "lead": 5, "timer_hours": 4, "ring_again": True}
+TG_LEADS = (-1, 0, 5, 10, 15, 30)  # minutes before a planned block; -1 = off
+TG_TIMER_HOURS = (0, 2, 3, 4, 6, 8)  # 0 = off
+TOKEN_RE = re.compile(r"^\d{4,15}:[A-Za-z0-9_-]{30,60}$")
+RING_AGAIN_AFTER = 300  # an unanswered alarm rings once more after this many seconds
+ALARM_GRACE = 12 * 3600  # alarms missed while the server was down still ring, up to this late
+BRIEF_GRACE = 4 * 3600
+NIGHT = (23, 7)  # no timer nudges from 23:00 to 07:00 (local time)
+ACKED = 9  # tasks.rings once an alarm was answered
+PRIORITY_NAMES = ("", "Low", "Medium", "High")
+FORMAT_ENTITIES = {"bold", "italic", "underline", "strikethrough", "code", "pre", "text_link", "spoiler"}
+JM_FA = ("فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند")
+WD_FA = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")  # Monday first, like weekday()
+SOCKS_ERRORS = {1: "general failure", 2: "not allowed by the proxy", 3: "network unreachable", 4: "host unreachable",
+                5: "connection refused", 6: "timed out", 7: "command not supported", 8: "address type not supported"}
+BOT_COMMANDS = [
+    ("today", "Today's plan and to-dos"), ("todo", "Open to-dos"), ("remind", "Quick alarm: /remind 18:30 Call mom"),
+    ("timer", "The running timer"), ("stop", "Stop the timer"), ("help", "What I can do"),
+]
+
+
+class TelegramError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise TelegramError(0, "The proxy closed the connection")
+        buf += chunk
+    return buf
+
+
+def socks5_connect(proxy, host, port, timeout):
+    """A TCP connection to host:port through a SOCKS5 proxy. The proxy looks the name up (like socks5h://)."""
+    try:
+        sock = socket.create_connection((proxy["host"], int(proxy["port"])), timeout=timeout)
+    except OSError as e:
+        raise TelegramError(0, f"Can't connect to the proxy at {proxy['host']}:{proxy['port']} ({e.strerror or e})")
+    try:
+        user, pw = (proxy.get("username") or "").encode(), (proxy.get("password") or "").encode()
+        sock.sendall(b"\x05\x02\x00\x02" if user else b"\x05\x01\x00")
+        ver, method = _recv_exact(sock, 2)
+        if ver != 5:
+            raise TelegramError(0, "That port isn't a SOCKS5 proxy")
+        if method == 2:
+            sock.sendall(b"\x01" + bytes([len(user)]) + user + bytes([len(pw)]) + pw)
+            if _recv_exact(sock, 2)[1] != 0:
+                raise TelegramError(0, "The proxy didn't accept the username or password")
+        elif method != 0:
+            raise TelegramError(0, "The proxy wants a username and password" if not user
+                                else "The proxy refused the connection")
+        name = host.encode("idna")
+        sock.sendall(b"\x05\x01\x00\x03" + bytes([len(name)]) + name + int(port).to_bytes(2, "big"))
+        _, rep, _, atyp = _recv_exact(sock, 4)
+        if rep != 0:
+            raise TelegramError(0, f"The proxy couldn't reach {host} ({SOCKS_ERRORS.get(rep, f'error {rep}')})")
+        _recv_exact(sock, ({1: 4, 4: 16}.get(atyp) or _recv_exact(sock, 1)[0]) + 2)  # the bound address and port
+        return sock
+    except TelegramError:
+        sock.close()
+        raise
+    except OSError as e:
+        sock.close()
+        raise TelegramError(0, f"The proxy stopped answering ({e.strerror or e})")
+
+
+class _ProxyHTTP(http.client.HTTPConnection):
+    def __init__(self, host, port, proxy, timeout):
+        super().__init__(host, port, timeout=timeout)
+        self.proxy = proxy
+
+    def connect(self):
+        self.sock = socks5_connect(self.proxy, self.host, self.port, self.timeout)
+
+
+class _ProxyHTTPS(http.client.HTTPSConnection):
+    def __init__(self, host, port, proxy, timeout):
+        self.tls = ssl.create_default_context()
+        super().__init__(host, port, timeout=timeout, context=self.tls)
+        self.proxy = proxy
+
+    def connect(self):
+        sock = socks5_connect(self.proxy, self.host, self.port, self.timeout)
+        self.sock = self.tls.wrap_socket(sock, server_hostname=self.host)
+
+
+def tg_call(token, proxy, method, params=None, timeout=20):
+    """Call a Bot API method and return its result. Errors never include the token."""
+    u = urlparse(TELEGRAM_API)
+    https = u.scheme == "https"
+    port = u.port or (443 if https else 80)
+    if proxy:
+        conn = (_ProxyHTTPS if https else _ProxyHTTP)(u.hostname, port, proxy, timeout)
+    else:
+        conn = (http.client.HTTPSConnection if https else http.client.HTTPConnection)(u.hostname, port, timeout=timeout)
+    via = " through the proxy" if proxy else ""
+    try:
+        conn.request("POST", f"{u.path}/bot{token}/{method}", json.dumps(params or {}).encode(),
+                     {"Content-Type": "application/json"})
+        res = conn.getresponse()
+        status, raw = res.status, res.read()
+    except TelegramError:
+        raise
+    except socket.timeout:
+        raise TelegramError(0, f"Telegram didn't answer in time{via}")
+    except (OSError, http.client.HTTPException) as e:
+        raise TelegramError(0, f"Can't reach Telegram{via} ({getattr(e, 'strerror', None) or e})")
+    finally:
+        conn.close()
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        raise TelegramError(status, f"Telegram answered {status}")
+    if not j.get("ok"):
+        code = j.get("error_code") or status
+        if code in (401, 404):
+            raise TelegramError(code, "Telegram doesn't accept this bot token. Check it, or get a new one from @BotFather.")
+        if code == 409:
+            raise TelegramError(code, "Another program is also reading this bot's messages. Use a bot just for Daybook.")
+        raise TelegramError(code, j.get("description") or f"Telegram answered {status}")
+    return j.get("result")
+
+
+# --- settings
+
+def tg_row(db, uid):
+    return db.execute("SELECT * FROM telegram WHERE user_id=?", (uid,)).fetchone()
+
+
+def tg_settings(row):
+    out = dict(TG_DEFAULTS)
+    try:
+        out.update(json.loads(row["settings"] or "{}") if row else {})
+    except ValueError:
+        pass
+    return out
+
+
+def tg_proxy(row):
+    try:
+        return json.loads(row["proxy"]) if row and row["proxy"] else None
+    except ValueError:
+        return None
+
+
+def tg_zone(name):
+    try:
+        return ZoneInfo(name)
+    except Exception:  # unknown or malformed name
+        return dt.timezone.utc
+
+
+def tz_value(value):
+    v = str(value or "")
+    try:
+        if len(v) > 64:
+            raise ValueError
+        ZoneInfo(v)
+    except Exception:
+        raise ApiError(400, "Unknown time zone")
+    return v
+
+
+def parse_proxy(b, old=None):
+    """A SOCKS5 proxy from a request: host, port and an optional username and password. The host may also be a
+    whole socks5:// link. A missing password keeps the saved one; an empty host means no proxy."""
+    if b is None:
+        return None
+    if not isinstance(b, dict):
+        raise ApiError(400, "Invalid proxy")
+    host, port = str(b.get("host") or "").strip(), b.get("port")
+    user, pw = b.get("username"), b.get("password")
+    if "://" in host:
+        u = urlparse(host)
+        if u.scheme not in ("socks5", "socks5h"):
+            raise ApiError(400, "Only SOCKS5 proxies work here (a link starting with socks5://)")
+        try:
+            port = u.port or port
+        except ValueError:
+            raise ApiError(400, "Invalid proxy port")
+        if u.username:
+            user = unquote(u.username)
+            pw = unquote(u.password) if u.password is not None else pw
+        host = u.hostname or ""
+    host = host.strip("[]")
+    if not host:
+        return None
+    if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.:_-]+", host):
+        raise ApiError(400, "Invalid proxy address")
+    port = int(number(port, "Proxy port", 1, 65535))
+    user = str(user or "").strip()
+    if pw is None:
+        pw = (old or {}).get("password") or ""
+    pw = str(pw)
+    if len(user.encode()) > 255 or len(pw.encode()) > 255:
+        raise ApiError(400, "The proxy username or password is too long")
+    return {"host": host, "port": port, "username": user, "password": pw if user else ""}
+
+
+def tg_status(db, uid):
+    row = tg_row(db, uid)
+    if not row:
+        return {"configured": False, "linked": False, "settings": dict(TG_DEFAULTS), "proxy": None}
+    p, tok = tg_proxy(row), row["bot_token"]
+    code, bot = row["link_code"], row["bot_username"]
+    return {
+        "configured": True, "bot": bot, "token_hint": f"{tok.split(':')[0]}:…{tok[-4:]}",
+        "linked": row["chat_id"] is not None, "chat": row["chat_name"],
+        "link_code": code, "link_url": f"https://t.me/{bot}?start={code}" if code and bot else None,
+        "proxy": {"host": p["host"], "port": p["port"], "username": p.get("username") or "",
+                  "has_password": bool(p.get("password"))} if p else None,
+        "settings": tg_settings(row), "tz": row["tz"],
+        "last_ok": row["last_ok"], "last_error": row["last_error"], "last_error_at": row["last_error_at"],
+    }
+
+
+# --- formatting
+
+def h(s):
+    return html_escape(str(s), quote=False)
+
+
+def u16(s):
+    return len(s.encode("utf-16-le")) // 2  # Telegram counts text offsets in UTF-16 units
+
+
+def tg_hrs(sec):
+    """5400 -> "1 h 30 min", like the app."""
+    m = round(sec / 60)
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60} min" if m % 60 else f"{m // 60} h"
+
+
+def fa_digits(s):
+    return str(s).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
+
+
+def to_jalali(d):
+    """Gregorian date -> (year, month, day) in the Solar Hijri calendar."""
+    days_before = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+    gy2 = d.year + 1 if d.month > 2 else d.year
+    days = (355666 + 365 * d.year + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400
+            + d.day + days_before[d.month - 1])
+    jy = -1595 + 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        return jy, 1 + days // 31, 1 + days % 31
+    return jy, 7 + (days - 186) // 30, 1 + (days - 186) % 30
+
+
+class TgCtx:
+    """One user's settings, clock and calendar while handling Telegram."""
+
+    def __init__(self, db, row, now=None):
+        self.db, self.row, self.uid = db, row, row["user_id"]
+        self.s = tg_settings(row)
+        self.zone = tg_zone(row["tz"])
+        self.now = now if now is not None else now_ts()
+        self.local = dt.datetime.fromtimestamp(self.now, self.zone)
+        self.today = self.local.date()
+        self.jalali = user_prefs(db, self.uid).get("calendar") == "jalali"
+
+    def day_start(self, d):
+        return int(dt.datetime.combine(d, dt.time(), self.zone).timestamp())
+
+    def hm(self, ts):
+        return dt.datetime.fromtimestamp(ts, self.zone).strftime("%H:%M")
+
+    def weekday(self, d):
+        return WD_FA[d.weekday()] if self.jalali else d.strftime("%A")
+
+    def day_title(self, d):
+        if self.jalali:
+            _, jm, jd = to_jalali(d)
+            return f"{WD_FA[d.weekday()]} {fa_digits(jd)} {JM_FA[jm - 1]}"
+        return f"{d.strftime('%A')} {d.day} {d.strftime('%B')}"
+
+    def short_day(self, d):
+        if self.jalali:
+            _, jm, jd = to_jalali(d)
+            return f"{fa_digits(jd)} {JM_FA[jm - 1]}"
+        return f"{d.day} {d.strftime('%b')}"
+
+    def when(self, ts):
+        """"14:30", "tomorrow 09:00", "Friday 09:00" or "3 Dec 09:00"."""
+        d = dt.datetime.fromtimestamp(ts, self.zone).date()
+        diff = (d - self.today).days
+        if diff == 0:
+            return self.hm(ts)
+        if diff in (-1, 1):
+            return f"{'tomorrow' if diff == 1 else 'yesterday'} {self.hm(ts)}"
+        if 1 < diff < 7:
+            return f"{self.weekday(d)} {self.hm(ts)}"
+        return f"{self.short_day(d)} {self.hm(ts)}"
+
+    def due_text(self, due):
+        diff = (dt.date.fromisoformat(due) - self.today).days
+        if diff == 0:
+            return "due today"
+        if diff == 1:
+            return "due tomorrow"
+        if diff < 0:
+            return f"{-diff} day{'s' if diff < -1 else ''} late"
+        if diff < 7:
+            return f"due {self.weekday(dt.date.fromisoformat(due))}"
+        return f"due {self.short_day(dt.date.fromisoformat(due))}"
+
+    def project_name(self, pid):
+        r = self.db.execute("SELECT name FROM projects WHERE id=? AND user_id=?", (pid, self.uid)).fetchone()
+        return r["name"] if r else None
+
+    def entry_title(self, e):
+        if e["description"]:
+            return e["description"]
+        if e["task_id"]:
+            t = self.db.execute("SELECT title FROM tasks WHERE id=?", (e["task_id"],)).fetchone()
+            if t:
+                return t["title"]
+        return (self.project_name(e["project_id"]) if e["project_id"] else None) or "No description"
+
+
+class TgBot:
+    """Sends to one user's linked chat."""
+
+    def __init__(self, row):
+        self.token, self.proxy, self.chat = row["bot_token"], tg_proxy(row), row["chat_id"]
+
+    def call(self, method, wait=20, **params):
+        return tg_call(self.token, self.proxy, method, params, wait)
+
+    def send(self, text, buttons=None, chat=None):
+        p = {"chat_id": chat or self.chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if buttons:
+            p["reply_markup"] = {"inline_keyboard": buttons}
+        return self.call("sendMessage", **p)["message_id"]
+
+    def drop_buttons(self, msg_id):
+        try:
+            self.call("editMessageReplyMarkup", chat_id=self.chat, message_id=msg_id,
+                      reply_markup={"inline_keyboard": []})
+        except TelegramError as e:
+            if e.code != 400:  # 400: already gone or unchanged
+                raise
+
+    def close(self, msg, status):
+        """Swap a message's buttons for a status line, keeping its text and formatting."""
+        text = msg.get("text") or ""
+        ents = [e for e in msg.get("entities") or [] if e.get("type") in FORMAT_ENTITIES]
+        ents.append({"type": "italic", "offset": u16(text) + 2, "length": u16(status)})
+        try:
+            self.call("editMessageText", chat_id=self.chat, message_id=msg["message_id"], text=f"{text}\n\n{status}",
+                      entities=ents, reply_markup={"inline_keyboard": []})
+        except TelegramError as e:
+            if e.code != 400:
+                raise
+
+
+def btn(text, data):
+    return {"text": text, "callback_data": data}
+
+
+def tg_send(db, bot, x, text, buttons=None):
+    """Send one notification. A message Telegram refuses (400) is logged and skipped, so it can't block the rest."""
+    try:
+        return bot.send(text, buttons)
+    except TelegramError as e:
+        if e.code != 400:
+            raise
+        sys.stderr.write(f"telegram: user {x.uid}: message refused: {e.message}\n")
+        return None
+
+
+def tg_was_sent(db, uid, key):
+    return db.execute("SELECT 1 FROM tg_sent WHERE user_id=? AND key=?", (uid, key)).fetchone() is not None
+
+
+def tg_mark_sent(db, uid, key, t):
+    db.execute("INSERT OR IGNORE INTO tg_sent (user_id, key, sent_at) VALUES (?,?,?)", (uid, key, t))
+    db.execute("DELETE FROM tg_sent WHERE user_id=? AND sent_at<?", (uid, t - 40 * 86400))
+
+
+# --- what gets sent
+
+def alarm_text(x, t, again=False):
+    lines = [f"⏰ <b>{h(t['title'])}</b>" + (" (again)" if again else "")]
+    sub = [x.project_name(t["project_id"]) if t["project_id"] else None,
+           x.due_text(t["due"]) if t["due"] else None,
+           f"{PRIORITY_NAMES[t['priority']]} priority" if t["priority"] else None]
+    if any(sub):
+        lines.append(h(" · ".join(s for s in sub if s)))
+    if t["notes"]:
+        lines.append(f"<i>{h(t['notes'][:300])}</i>")
+    return "\n".join(lines)
+
+
+def alarm_buttons(tid):
+    return [[btn("✓ Done", f"done:{tid}"), btn("OK", f"ok:{tid}")],
+            [btn("💤 10 min", f"snz:{tid}:10"), btn("💤 1 hour", f"snz:{tid}:60"), btn("Tomorrow", f"snz:{tid}:1440")]]
+
+
+def tg_alarms(db, bot, x):
+    rows = db.execute("SELECT * FROM tasks WHERE user_id=? AND done=0 AND remind_at<=? AND remind_at>? AND rings<2 "
+                      "ORDER BY remind_at", (x.uid, x.now, x.now - ALARM_GRACE)).fetchall()
+    for t in rows:
+        if t["rings"] == 0:
+            mid = tg_send(db, bot, x, alarm_text(x, t), alarm_buttons(t["id"]))
+            db.execute("UPDATE tasks SET rings=1, rang_at=?, ring_msg=? WHERE id=?", (x.now, mid, t["id"]))
+        elif x.s["ring_again"] and x.now >= (t["rang_at"] or 0) + RING_AGAIN_AFTER:
+            if t["ring_msg"]:
+                bot.drop_buttons(t["ring_msg"])
+            mid = tg_send(db, bot, x, alarm_text(x, t, again=True), alarm_buttons(t["id"]))
+            db.execute("UPDATE tasks SET rings=2, ring_msg=? WHERE id=?", (mid, t["id"]))
+        else:
+            continue
+        db.commit()
+
+
+def running_matches(db, uid, project_id, task_id):
+    r = running_entry(db, uid)
+    return r is not None and (r["project_id"], r["task_id"]) == (project_id, task_id)
+
+
+def tg_heads_up(db, bot, x):
+    lead = x.s["lead"]
+    if lead < 0:
+        return
+    rows = db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND start_ts<=? AND start_ts>? ORDER BY start_ts",
+                      (x.uid, x.now + lead * 60, x.now - 60)).fetchall()
+    for b in rows:
+        key = f"block:{b['id']}:{b['start_ts']}"
+        if tg_was_sent(db, x.uid, key):
+            continue
+        mins = round((b["start_ts"] - x.now) / 60)
+        lines = [f"🗓 {'Starting now' if mins <= 0 else f'In {mins} min'} · {x.hm(b['start_ts'])}–{x.hm(b['end_ts'])}",
+                 f"<b>{h(block_summary(db, b))}</b>"]
+        proj = x.project_name(b["project_id"]) if b["project_id"] else None
+        if proj and proj != block_summary(db, b):
+            lines.append(h(proj))
+        if b["notes"]:
+            lines.append(f"<i>{h(b['notes'][:200])}</i>")
+        start = None if running_matches(db, x.uid, b["project_id"], b["task_id"]) else \
+            [[btn("▶ Start timer", f"start:{b['id']}")]]
+        tg_send(db, bot, x, "\n".join(lines), start)
+        tg_mark_sent(db, x.uid, key, x.now)
+        db.commit()
+
+
+def open_tasks_sorted(db, uid, today):
+    """Open to-dos: overdue, due today, upcoming, then the rest by priority."""
+    rows = db.execute("SELECT * FROM tasks WHERE user_id=? AND done=0", (uid,)).fetchall()
+    t0 = today.isoformat()
+    return sorted(rows, key=lambda t: (
+        0 if t["due"] and t["due"] < t0 else 1 if t["due"] == t0 else 2 if t["due"] else 3,
+        t["due"] or "", -t["priority"], t["id"]))
+
+
+def task_line(x, t):
+    late = t["due"] and t["due"] < x.today.isoformat()
+    bits = [h(t["title"])]
+    if t["priority"] == 3:
+        bits[0] += " ❗"
+    if t["due"] and t["due"] != x.today.isoformat():
+        bits.append(x.due_text(t["due"]))
+    if t["remind_at"] and t["remind_at"] > x.now:
+        bits.append(f"⏰ {x.when(t['remind_at'])}")
+    return ("⚠️ " if late else "• ") + " · ".join(bits)
+
+
+def capped(lines, n=8):
+    return lines[:n] + ([f"…and {len(lines) - n} more"] if len(lines) > n else [])
+
+
+def tg_brief_text(db, x, greeting=True):
+    """Today's remaining plan and the to-dos due (or with an alarm) today. None when there's nothing."""
+    d0, d1 = x.day_start(x.today), x.day_start(x.today + dt.timedelta(days=1))
+    blocks = db.execute("SELECT * FROM plan_blocks WHERE user_id=? AND start_ts<? AND end_ts>? ORDER BY start_ts",
+                        (x.uid, d1, max(d0, x.now))).fetchall()
+    t0 = x.today.isoformat()
+    tasks = [t for t in open_tasks_sorted(db, x.uid, x.today)
+             if (t["due"] and t["due"] <= t0) or (t["remind_at"] and d0 <= t["remind_at"] < d1)]
+    if not blocks and not tasks:
+        return None
+    out = [f"{'☀️ ' if greeting else ''}<b>{h(x.day_title(x.today))}</b>"]
+    if blocks:
+        out += ["", "<b>Planned</b>"]
+        out += capped([f"{x.hm(max(b['start_ts'], d0))}–{x.hm(min(b['end_ts'], d1))}  {h(block_summary(db, b))}"
+                       for b in blocks])
+    if tasks:
+        out += ["", "<b>To-do</b>"] + capped([task_line(x, t) for t in tasks])
+    if greeting:
+        y = x.today - dt.timedelta(days=1)
+        y0 = x.day_start(y)
+        tracked = sum(max(0, min(r[1] or x.now, d0) - max(r[0], y0)) for r in db.execute(
+            "SELECT start_ts, end_ts FROM time_entries WHERE user_id=? AND start_ts<? AND COALESCE(end_ts, ?)>?",
+            (x.uid, d0, x.now, y0)))
+        day = day_payload(db, x.uid, y)
+        eaten = day["totals"]["kcal"]
+        recap = ([f"{tg_hrs(tracked)} tracked"] if tracked >= 60 else []) + \
+            ([f"{eaten:,.0f} of {day['targets']['kcal'] + day['exercise']:,.0f} kcal"] if eaten else [])
+        if recap:
+            out += ["", f"Yesterday: {' · '.join(recap)}"]
+    return "\n".join(out)
+
+
+def open_button():
+    return [[{"text": "Open Daybook", "url": f"{PUBLIC_URL}/#plan"}]] if PUBLIC_URL.startswith("https://") else None
+
+
+def tg_brief(db, bot, x):
+    if not x.s["brief"]:
+        return
+    hh, mm = (int(v) for v in x.s["brief_time"].split(":"))
+    at = int(dt.datetime.combine(x.today, dt.time(hh, mm), x.zone).timestamp())
+    key = f"brief:{x.today}"
+    if not at <= x.now < at + BRIEF_GRACE or tg_was_sent(db, x.uid, key):
+        return
+    text = tg_brief_text(db, x)
+    if text:  # nothing on today: no message
+        tg_send(db, bot, x, text, open_button())
+    tg_mark_sent(db, x.uid, key, x.now)
+    db.commit()
+
+
+def tg_timer_nudge(db, bot, x):
+    hours = x.s["timer_hours"]
+    r = running_entry(db, x.uid) if hours else None
+    if not r or x.now - r["start_ts"] < hours * 3600 or x.local.hour >= NIGHT[0] or x.local.hour < NIGHT[1]:
+        return
+    key = f"timer:{r['id']}"
+    if tg_was_sent(db, x.uid, key):
+        return
+    tg_send(db, bot, x, f"⏱ Your timer has been running for <b>{tg_hrs(x.now - r['start_ts'])}</b>\n"
+                        f"{h(x.entry_title(r))}\nStill on it?",
+            [[btn("■ Stop now", f"stop:{r['id']}"), btn("Keep going", "keep")]])
+    tg_mark_sent(db, x.uid, key, x.now)
+    db.commit()
+
+
+def tg_send_due(db, bot, x):
+    """Send everything that's due for one user. Each message is recorded as soon as it's sent."""
+    tg_alarms(db, bot, x)
+    tg_heads_up(db, bot, x)
+    tg_brief(db, bot, x)
+    tg_timer_nudge(db, bot, x)
+
+
+# --- messages and button presses from the chat
+
+def tg_welcome(x):
+    s = x.s
+    what = ["• an alarm for each to-do you give a reminder time"]
+    if s["lead"] >= 0:
+        what.append("• a heads-up " + ("when planned time starts" if s["lead"] == 0 else f"{s['lead']} min before planned time"))
+    if s["brief"]:
+        what.append(f"• a short summary of your day at {s['brief_time']} (only when something's on)")
+    if s["timer_hours"]:
+        what.append(f"• a nudge if a timer runs longer than {s['timer_hours']} h")
+    return "\n".join([
+        "✅ <b>Connected to Daybook.</b>", "", "I'll send you:", *what, "",
+        "Send me any text to add it as a to-do (the first line is the title).", "",
+        "/today – today's plan and to-dos", "/todo – open to-dos",
+        "/remind 18:30 Call mom – a quick alarm (also 20m, 2h, tomorrow 9:00)",
+        "/timer – the running timer", "/stop – stop the timer", "",
+        "Change what I send in Daybook → Settings → Telegram."])
+
+
+REMIND_RE = re.compile(r"^(?:(tomorrow|tmrw|فردا)\s+)?(?:(\d{1,2})[:.](\d{2})|(\d{1,4})\s*(m|min|mins|minutes?|h|hr|hrs|hours?))"
+                       r"\s+(.+)$", re.I | re.S)
+
+
+def parse_remind(x, arg):
+    """"18:30 Call mom", "tomorrow 9:00 Gym", "20m Tea", "2h Stretch" -> (timestamp, text), or None."""
+    m = REMIND_RE.match(arg.strip().translate(_DIGITS))
+    if not m:
+        return None
+    tomorrow, hh, mm, n, unit, what = m.groups()
+    if n:
+        if tomorrow:
+            return None
+        secs = int(n) * (3600 if unit.lower().startswith("h") else 60)
+        return (x.now + secs, what.strip()) if 0 < secs <= 7 * 86400 else None
+    hh, mm = int(hh), int(mm)
+    if hh > 23 or mm > 59:
+        return None
+    day = x.today + dt.timedelta(days=1 if tomorrow else 0)
+    ts = int(dt.datetime.combine(day, dt.time(hh, mm), x.zone).timestamp())
+    if ts <= x.now:
+        ts = int(dt.datetime.combine(day + dt.timedelta(days=1), dt.time(hh, mm), x.zone).timestamp())
+    return ts, what.strip()
+
+
+def add_task(db, uid, text_in, due=None, remind_at=None):
+    first, _, rest = text_in.strip().partition("\n")
+    title = text(first, "Title", 200)
+    cur = db.execute("INSERT INTO tasks (user_id, title, notes, due, remind_at, created_at) VALUES (?,?,?,?,?,?)",
+                     (uid, title, rest.strip()[:2000], due, remind_at, now_ts()))
+    return cur.lastrowid, title
+
+
+def tg_todo_text(db, x):
+    tasks = open_tasks_sorted(db, x.uid, x.today)
+    if not tasks:
+        return "No open to-dos. Send me some text to add one."
+    return "\n".join([f"<b>To-do</b> · {len(tasks)} open", *capped([task_line(x, t) for t in tasks], 15)])
+
+
+def tg_timer_text(db, x):
+    r = running_entry(db, x.uid)
+    if not r:
+        return "No timer running.", None
+    return (f"⏱ <b>{h(x.entry_title(r))}</b>\nRunning for {tg_hrs(x.now - r['start_ts'])} "
+            f"(since {x.when(r['start_ts'])})", [[btn("■ Stop", f"stop:{r['id']}")]])
+
+
+def tg_stop_text(x, stopped):
+    return f"■ Stopped at {x.hm(stopped['end_ts'])} · {tg_hrs(stopped['end_ts'] - stopped['start_ts'])}"
+
+
+def tg_link(db, bot, x, chat, code):
+    """Connect the chat that opened the link from Settings (it carries the one-time code)."""
+    if x.row["chat_id"] is None and x.row["link_code"] and hmac.compare_digest(code.encode(), x.row["link_code"].encode()):
+        name = " ".join(filter(None, [chat.get("first_name"), chat.get("last_name")])) or chat.get("title") \
+            or chat.get("username") or "your chat"
+        db.execute("UPDATE telegram SET chat_id=?, chat_name=?, link_code=NULL WHERE user_id=?",
+                   (chat["id"], name[:100], x.uid))
+        hh, mm = (int(v) for v in x.s["brief_time"].split(":"))
+        if x.local.time() >= dt.time(hh, mm):  # today's summary time has passed: start tomorrow
+            tg_mark_sent(db, x.uid, f"brief:{x.today}", x.now)
+        db.commit()
+        bot.send(tg_welcome(x), chat=chat["id"])
+        try:
+            bot.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in BOT_COMMANDS])
+        except TelegramError:
+            pass
+    elif x.row["chat_id"] is None:
+        bot.send("To connect this chat, open the link in Daybook → Settings → Telegram.", chat=chat["id"])
+
+
+def tg_on_message(db, bot, x, m):
+    chat = m.get("chat") or {}
+    msg = (m.get("text") or "").strip()
+    if x.row["chat_id"] is None or chat.get("id") != x.row["chat_id"]:
+        if msg.startswith("/start"):
+            tg_link(db, bot, x, chat, msg[6:].strip())
+        return  # strangers get nothing
+    cmd, _, arg = msg.partition(" ")
+    cmd = cmd.split("@")[0].lower() if cmd.startswith("/") else ""
+    if cmd in ("/start", "/help"):
+        bot.send(tg_welcome(x).replace("✅ <b>Connected to Daybook.</b>", "<b>Daybook</b>"))
+    elif cmd == "/today":
+        bot.send(tg_brief_text(db, x, greeting=False) or "Nothing planned and no to-dos due today.")
+    elif cmd == "/todo":
+        bot.send(tg_todo_text(db, x))
+    elif cmd == "/timer":
+        bot.send(*tg_timer_text(db, x))
+    elif cmd == "/stop":
+        stopped = timer_stop(db, x.uid, x.now)
+        db.commit()
+        bot.send(tg_stop_text(x, stopped) if stopped else "No timer was running.")
+    elif cmd == "/remind":
+        parsed = parse_remind(x, arg)
+        if not parsed or not parsed[1]:
+            bot.send("Say when and what, like:\n/remind 18:30 Call mom\n/remind 20m Take the tea out\n"
+                     "/remind tomorrow 9:00 Book the dentist")
+            return
+        ts, what = parsed
+        due = dt.datetime.fromtimestamp(ts, x.zone).date().isoformat()
+        tid, title = add_task(db, x.uid, what, due=due, remind_at=ts)
+        db.commit()
+        bot.send(f"⏰ I'll remind you {'at ' if x.when(ts)[0].isdigit() else ''}{h(x.when(ts))}: <b>{h(title)}</b>",
+                 [[btn("Undo", f"undo:{tid}")]])
+    elif cmd == "/add" or not cmd:
+        what = arg if cmd else m.get("text") or ""
+        if not what.strip():
+            if cmd:
+                bot.send("Send /add and the to-do, or just send the text.")
+            return  # a sticker or photo
+        tid, title = add_task(db, x.uid, what)
+        db.commit()
+        bot.send(f"Added to your to-dos: <b>{h(title)}</b>", [[btn("Undo", f"undo:{tid}")]])
+    else:
+        bot.send("I don't know that command. Send /help to see what I can do.")
+
+
+def tg_on_callback(db, bot, x, q):
+    msg = q.get("message") or {}
+    if x.row["chat_id"] is None or (msg.get("chat") or {}).get("id") != x.row["chat_id"]:
+        bot.call("answerCallbackQuery", callback_query_id=q["id"])
+        return
+    kind, *args = (q.get("data") or "").split(":")
+    status = None
+    try:
+        ref = int(args[0]) if args else None
+    except ValueError:
+        ref = None
+    if kind in ("done", "ok", "snz", "undo"):
+        t = db.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (ref, x.uid)).fetchone()
+        if not t:
+            status = "This to-do was deleted"
+        elif kind == "done":
+            db.execute("UPDATE tasks SET done=1, done_at=?, rings=? WHERE id=?", (x.now, ACKED, ref))
+            status = f"✓ Done at {x.hm(x.now)}"
+        elif kind == "ok":
+            db.execute("UPDATE tasks SET rings=? WHERE id=?", (ACKED, ref))
+            status = "👍 Got it"
+        elif kind == "snz":
+            mins = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
+            new = x.now + min(mins, 1440) * 60
+            db.execute("UPDATE tasks SET remind_at=?, rings=0, rang_at=NULL, ring_msg=NULL WHERE id=?", (new, ref))
+            status = f"💤 Snoozed until {x.when(new)}"
+        else:
+            db.execute("DELETE FROM tasks WHERE id=?", (ref,))
+            status = "↩ Removed"
+    elif kind == "start":
+        b = db.execute("SELECT * FROM plan_blocks WHERE id=? AND user_id=?", (ref, x.uid)).fetchone()
+        if not b:
+            status = "This planned block was deleted"
+        else:
+            timer_start(db, x.uid, b["project_id"], b["task_id"], b["title"], x.now)
+            status = f"▶ Timer started at {x.hm(x.now)}"
+    elif kind == "stop":
+        r = running_entry(db, x.uid)
+        if r and (ref is None or r["id"] == ref):
+            status = tg_stop_text(x, timer_stop(db, x.uid, x.now))
+        else:
+            status = "That timer was already stopped"
+    elif kind == "keep":
+        status = "👍 Keeping it running"
+    db.commit()
+    bot.call("answerCallbackQuery", callback_query_id=q["id"])
+    if status and msg.get("message_id"):
+        bot.close(msg, status)
+
+
+def tg_handle(db, uid, update, now=None):
+    """Handle one update from Telegram. Returns False when the user's bot is gone."""
+    row = tg_row(db, uid)
+    if row is None:
+        return False
+    bot, x = TgBot(row), TgCtx(db, row, now)
+    if "callback_query" in update:
+        tg_on_callback(db, bot, x, update["callback_query"])
+    elif "message" in update:
+        tg_on_message(db, bot, x, update["message"])
+    return True
+
+
+class TelegramHub:
+    """One thread per user with a bot: it sends what's due, then long-polls Telegram for messages, and repeats."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.threads, self.wakes = {}, {}
+
+    def start(self):
+        db = connect()
+        try:
+            uids = [r[0] for r in db.execute("SELECT user_id FROM telegram")]
+        finally:
+            db.close()
+        for uid in uids:
+            self.ensure(uid)
+        return self
+
+    def ensure(self, uid):
+        """Make sure the user's thread runs, and wake it if it's waiting after an error."""
+        with self.lock:
+            if uid in self.wakes:
+                self.wakes[uid].set()
+            t = self.threads.get(uid)
+            if t and t.is_alive():
+                return
+            self.wakes[uid] = threading.Event()
+            t = threading.Thread(target=self.run, args=(uid,), daemon=True, name=f"telegram-{uid}")
+            self.threads[uid] = t
+            t.start()
+
+    def finished(self, db, uid):
+        """True (and forget the thread) if the user no longer has a bot. Checked under the lock so a bot saved
+        at this moment isn't missed."""
+        with self.lock:
+            if tg_row(db, uid) is not None:
+                return False
+            self.threads.pop(uid, None)
+            self.wakes.pop(uid, None)
+            return True
+
+    def run(self, uid):
+        fails = 0
+        while True:
+            db = connect()
+            pause = 0
+            try:
+                row = tg_row(db, uid)
+                if row is None and self.finished(db, uid):
+                    return
+                if row is None:
+                    continue
+                bot = TgBot(row)
+                if row["chat_id"] is not None:
+                    tg_send_due(db, bot, TgCtx(db, row))
+                updates = bot.call("getUpdates", wait=TG_POLL + 15, offset=row["update_offset"], timeout=TG_POLL,
+                                   allowed_updates=["message", "callback_query"])
+                for u in updates or []:
+                    # Move past the update first: one that fails isn't retried (it could add a to-do twice).
+                    db.execute("UPDATE telegram SET update_offset=? WHERE user_id=?", (u["update_id"] + 1, uid))
+                    db.commit()
+                    try:
+                        if not tg_handle(db, uid, u):
+                            break
+                    except TelegramError:
+                        raise
+                    except Exception:
+                        db.rollback()
+                        traceback.print_exc()
+                row = tg_row(db, uid)
+                if row and (row["last_error"] or (row["last_ok"] or 0) < now_ts() - 600):
+                    db.execute("UPDATE telegram SET last_ok=?, last_error=NULL, last_error_at=NULL WHERE user_id=?",
+                               (now_ts(), uid))
+                    db.commit()
+                fails = 0
+            except TelegramError as e:
+                db.rollback()
+                fails += 1
+                pause = min(300, 5 * 2 ** min(fails, 6))
+                row = tg_row(db, uid)
+                if row and row["last_error"] != e.message:
+                    sys.stderr.write(f"telegram: user {uid}: {e.message}\n")
+                db.execute("UPDATE telegram SET last_error=?, last_error_at=? WHERE user_id=?",
+                           (e.message, now_ts(), uid))
+                db.commit()
+            except Exception:
+                db.rollback()
+                traceback.print_exc()
+                fails += 1
+                pause = 60
+            finally:
+                db.close()
+            if pause:
+                with self.lock:
+                    wake = self.wakes.get(uid)
+                if wake:
+                    wake.wait(pause)
+                    wake.clear()
+
+
+def kick_telegram(c):
+    c.after.append(lambda: TG and TG.ensure(c.uid))
+
+
+@route("GET", "/api/telegram")
+def api_telegram(c):
+    return tg_status(c.db, c.uid)
+
+
+@route("PUT", "/api/telegram/bot")
+def api_telegram_bot(c):
+    """Save the bot token and proxy. Checks them with Telegram first."""
+    b, row = c.body, tg_row(c.db, c.uid)
+    token = str(b.get("token") or "").strip()
+    if not token:
+        if not row:
+            raise ApiError(400, "Paste the bot token from @BotFather")
+        token = row["bot_token"]
+    elif not TOKEN_RE.match(token):
+        raise ApiError(400, "That doesn't look like a bot token. It's the long code @BotFather sends, like 123456789:AAH…")
+    if c.db.execute("SELECT 1 FROM telegram WHERE bot_token=? AND user_id<>?", (token, c.uid)).fetchone():
+        raise ApiError(400, "Another Daybook account uses this bot. Make a separate bot for this account.")
+    old_proxy = tg_proxy(row)
+    proxy = parse_proxy(b.get("proxy"), old_proxy) if "proxy" in b else old_proxy
+    tz = tz_value(b["tz"]) if b.get("tz") else (row["tz"] if row else "UTC")
+    try:
+        me = tg_call(token, proxy, "getMe", timeout=15)
+    except TelegramError as e:
+        raise ApiError(400, e.message)
+    try:
+        tg_call(token, proxy, "deleteWebhook", timeout=10)  # a webhook would stop us from reading messages
+    except TelegramError:
+        pass
+    username, t = me.get("username") or "", now_ts()
+    pj = json.dumps(proxy) if proxy else None
+    if row and row["bot_token"] == token:
+        c.db.execute("UPDATE telegram SET bot_username=?, proxy=?, tz=?, last_ok=?, last_error=NULL, "
+                     "last_error_at=NULL WHERE user_id=?", (username, pj, tz, t, c.uid))
+    else:  # a new bot: link a chat again
+        c.db.execute("INSERT OR REPLACE INTO telegram (user_id, bot_token, bot_username, proxy, link_code, settings, tz, "
+                     "last_ok, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (c.uid, token, username, pj, secrets.token_hex(6),
+                      row["settings"] if row else json.dumps(TG_DEFAULTS), tz, t, t))
+    kick_telegram(c)
+    return tg_status(c.db, c.uid)
+
+
+@route("PUT", "/api/telegram")
+def api_telegram_save(c):
+    """What to send: {brief, brief_time, lead, timer_hours, ring_again, tz}."""
+    row = tg_row(c.db, c.uid)
+    if not row:
+        raise ApiError(404, "Set up the Telegram bot first")
+    s, b = tg_settings(row), c.body
+    if "brief" in b:
+        s["brief"] = bool(b["brief"])
+    if "brief_time" in b:
+        v = str(b["brief_time"] or "")
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", v)
+        if not m or int(m[1]) > 23 or int(m[2]) > 59:
+            raise ApiError(400, "Invalid time for the morning summary")
+        s["brief_time"] = f"{int(m[1]):02d}:{m[2]}"
+    if "lead" in b:
+        s["lead"] = int(number(b["lead"], "Heads-up", -1, 60))
+        if s["lead"] not in TG_LEADS:
+            raise ApiError(400, "Invalid heads-up time")
+    if "timer_hours" in b:
+        s["timer_hours"] = int(number(b["timer_hours"], "Timer nudge", 0, 24))
+        if s["timer_hours"] not in TG_TIMER_HOURS:
+            raise ApiError(400, "Invalid timer nudge")
+    if "ring_again" in b:
+        s["ring_again"] = bool(b["ring_again"])
+    tz = tz_value(b["tz"]) if b.get("tz") else row["tz"]
+    c.db.execute("UPDATE telegram SET settings=?, tz=? WHERE user_id=?", (json.dumps(s), tz, c.uid))
+    kick_telegram(c)
+    return tg_status(c.db, c.uid)
+
+
+@route("POST", "/api/telegram/test")
+def api_telegram_test(c):
+    row = tg_row(c.db, c.uid)
+    if not row or row["chat_id"] is None:
+        raise ApiError(400, "Connect a Telegram chat first")
+    try:
+        TgBot(row).send("✅ Test from Daybook. Your reminders will arrive here.")
+    except TelegramError as e:
+        raise ApiError(400, e.message)
+    c.db.execute("UPDATE telegram SET last_ok=?, last_error=NULL, last_error_at=NULL WHERE user_id=?",
+                 (now_ts(), c.uid))
+    kick_telegram(c)
+    return tg_status(c.db, c.uid)
+
+
+@route("DELETE", "/api/telegram")
+def api_telegram_delete(c):
+    c.db.execute("DELETE FROM telegram WHERE user_id=?", (c.uid,))
+    kick_telegram(c)  # wakes the thread so it notices and stops
+    return {"ok": True}
+
+
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com; "
        "font-src https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -2695,10 +3696,11 @@ def main():
     if len(sys.argv) > 1:
         return cli(sys.argv[1:])
     init_db()
-    global GSYNC
+    global GSYNC, TG
     if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
         GSYNC = GoogleSync().start()
         GSYNC.wake.set()  # catch up on changes made while the server was down
+    TG = TelegramHub().start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"Daybook running on http://{HOST}:{PORT}  (data: {db_path()})"
