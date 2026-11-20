@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The running timer on the home-screen widgets: Android keeps it ticking by itself. -->
+<Chronometer xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/chronometer"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:fontFeatureSettings="tnum"
+    android:textColor="@color/widget_ink"
+    android:textSize="22sp"
+    android:textStyle="bold" />

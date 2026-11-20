@@ -8,3 +8,6 @@
 -keepclasseswithmembers class app.calorietracker.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+
+# Widget actions, receivers and the refresh worker are created by class name.
+-keep class app.calorietracker.widget.** { <init>(...); }

@@ -39,7 +39,8 @@ private val DarkPalette = Palette(
 
 val LocalPalette = staticCompositionLocalOf { LightPalette }
 
-private val LightScheme = lightColorScheme(
+/** Also used by the home-screen widgets. */
+internal val LightScheme = lightColorScheme(
     primary = Color(0xFF2A78D6), onPrimary = Color.White,
     primaryContainer = Color(0xFFDCE9FA), onPrimaryContainer = Color(0xFF0D366B),
     secondaryContainer = Color(0xFFDCE9FA), onSecondaryContainer = Color(0xFF0D366B),
@@ -53,7 +54,8 @@ private val LightScheme = lightColorScheme(
     error = Color(0xFFD03B3B), onError = Color.White,
 )
 
-private val DarkScheme = darkColorScheme(
+/** Also used by the home-screen widgets. */
+internal val DarkScheme = darkColorScheme(
     primary = Color(0xFF3987E5), onPrimary = Color.White,
     primaryContainer = Color(0xFF184F95), onPrimaryContainer = Color(0xFFCDE2FB),
     secondaryContainer = Color(0xFF184F95), onSecondaryContainer = Color(0xFFCDE2FB),

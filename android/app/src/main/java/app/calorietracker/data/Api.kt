@@ -318,7 +318,8 @@ fun normalizeServerUrl(input: String): String {
     return s
 }
 
-class Api(var baseUrl: String, var token: String?) {
+/** [readTimeoutSec] is shorter for the home-screen widgets, which only get a limited time to run. */
+class Api(var baseUrl: String, var token: String?, readTimeoutSec: Long = 25) {
     @OptIn(ExperimentalSerializationApi::class)
     val json = Json {
         ignoreUnknownKeys = true
@@ -329,7 +330,7 @@ class Api(var baseUrl: String, var token: String?) {
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(readTimeoutSec, TimeUnit.SECONDS)
         .build()
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()

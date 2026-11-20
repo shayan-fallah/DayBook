@@ -87,6 +87,8 @@ class WorkStore(
     // Which section of the Time and Plan tabs is showing
     var timeTab by mutableStateOf("timer")
     var planTab by mutableStateOf("schedule")
+    /** Set by the to-do widget's + button: the to-do list opens the "new to-do" sheet. */
+    var newTaskRequest by mutableStateOf(false)
 
     var planDate by mutableStateOf(LocalDate.now())
     var week by mutableStateOf<PlanWeek?>(null)

@@ -572,6 +572,12 @@ private fun TodoPane(work: WorkStore, onSchedule: (TaskItem) -> Unit) {
     }
     var editing by remember { mutableStateOf<TaskItem?>(null) }
     var creating by remember { mutableStateOf(false) }
+    LaunchedEffect(work.newTaskRequest) {
+        if (work.newTaskRequest) {
+            creating = true
+            work.newTaskRequest = false
+        }
+    }
     val p = LocalPalette.current
     val prefs = work.prefs
     val filterPid = work.todoFilter.removePrefix("p").toLongOrNull()

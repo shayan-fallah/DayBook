@@ -31,6 +31,7 @@ import app.calorietracker.data.WorkoutStats
 import app.calorietracker.data.jsonBody
 import app.calorietracker.data.normalizeServerUrl
 import app.calorietracker.data.urlEncode
+import app.calorietracker.widget.WidgetRepo
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
@@ -148,6 +149,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         loadDay()
         loadQuick()
         work.start()
+        WidgetRepo.requestRefresh(getApplication())
     }
 
     fun logout() {
@@ -168,6 +170,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         workoutMeta = null
         gym = null
         work.reset()
+        WidgetRepo.requestRefresh(getApplication())
     }
 
     suspend fun changePassword(current: String, new: String): Boolean = act {

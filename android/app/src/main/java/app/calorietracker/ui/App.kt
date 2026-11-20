@@ -28,6 +28,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,8 +42,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.calorietracker.AppViewModel
+import app.calorietracker.Nav
 import app.calorietracker.data.Food
 import kotlinx.coroutines.launch
+import java.time.LocalDate
 
 enum class Tab(val label: String, val icon: ImageVector) {
     Today("Today", FoodIcon),
@@ -85,6 +88,36 @@ fun CalorieApp(vm: AppViewModel = viewModel()) {
     // A food picked outside the add screen (e.g. from Favorites) opens the portion sheet directly.
     var quickFood by remember { mutableStateOf<Food?>(null) }
     val work = vm.work
+
+    // A tap on a home-screen widget: open the matching screen.
+    val navTarget by Nav.target.collectAsState()
+    LaunchedEffect(navTarget) {
+        val target = navTarget ?: return@LaunchedEffect
+        Nav.consume()
+        morePage = null
+        addMeal = null
+        when (target) {
+            "add" -> {
+                tab = Tab.Today
+                addMeal = mealForNow()
+            }
+            "timer" -> {
+                tab = Tab.Time
+                work.timeTab = "timer"
+            }
+            "plan" -> {
+                tab = Tab.Plan
+                work.planTab = "schedule"
+                work.changePlanDate(LocalDate.now())
+            }
+            "todo", "newtask" -> {
+                tab = Tab.Plan
+                work.planTab = "todo"
+                if (target == "newtask") work.newTaskRequest = true
+            }
+            else -> tab = Tab.Today
+        }
+    }
 
     val meal = addMeal
     if (meal != null) {

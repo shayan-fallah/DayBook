@@ -108,6 +108,19 @@ meals, quick re-add, favorites, quick calories, water, weight, workouts and the 
 the timer, projects, reports, the planner and to-dos, history charts and settings (Google Calendar
 connects through your browser).
 
+**Home-screen widgets** (long-press the home screen → Widgets → Daybook):
+
+- **Agenda**: today's date, time tracked, the running timer (with a live clock and a stop button), and what's
+  planned for today and the coming week, including Google Calendar events. ▶ next to a planned block starts the
+  timer for it.
+- **To-do list**: open to-dos grouped into overdue, today, upcoming and someday. Tap the circle to finish one,
+  + to add one.
+- **Today**: calories left with a progress bar and macros, time tracked, and the timer. Make it one row high for
+  a compact version.
+
+The widgets update when you leave the app, every 30 minutes, and when you tap ↻. Taps open the matching screen
+in the app. They show the last data they loaded when you're offline.
+
 **Rebuild after changing the code** (needs only Docker, no Android Studio):
 
 ```bash
@@ -211,6 +224,12 @@ With Docker, prefix them: `docker compose exec calories python3 app.py users`.
 
 ```cron
 0 3 * * * cd /opt/daybook && python3 app.py backup /opt/backups/daybook-$(date +\%F).db
+```
+
+Better still, keep the copies on another machine. For example, send a compressed copy over SSH every night:
+
+```cron
+0 3 * * * cd /opt/daybook && python3 app.py backup /tmp/daybook.db && gzip -f /tmp/daybook.db && rsync -az -e "ssh -i /root/.ssh/backup_key" /tmp/daybook.db.gz you@backup-host:backups/daybook-$(date +\%F).db.gz
 ```
 
 ## Notes

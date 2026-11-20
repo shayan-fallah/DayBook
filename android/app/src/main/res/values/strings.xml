@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Daybook</string>
+    <string name="widget_agenda">Agenda</string>
+    <string name="widget_agenda_desc">Today\'s plan and the coming week, with the timer</string>
+    <string name="widget_todo">To-do list</string>
+    <string name="widget_todo_desc">Your open to-dos. Tap the circle to finish one</string>
+    <string name="widget_today">Today</string>
+    <string name="widget_today_desc">Calories left, macros, time tracked and the timer</string>
 </resources>
